@@ -42,6 +42,9 @@
 #include "debug/PciHost.hh"
 #include "dev/pci/device.hh"
 #include "dev/platform.hh"
+#include "mem/PciBridge.hh"
+#include "mem/packet.hh"
+#include "mem/packet_access.hh"
 #include "params/GenericPciHost.hh"
 #include "params/PciHost.hh"
 
@@ -62,6 +65,9 @@ PciHost::registerDevice(PciDevice *device, PciBusAddr bus_addr, PciIntPin pin)
 {
     auto map_entry = devices.emplace(bus_addr, device);
 
+    printf("%02x:%02x.%i: Registering device\n",
+            bus_addr.bus, bus_addr.dev, bus_addr.func);
+
     DPRINTF(PciHost, "%02x:%02x.%i: Registering device\n",
             bus_addr.bus, bus_addr.dev, bus_addr.func);
 
@@ -70,6 +76,21 @@ PciHost::registerDevice(PciDevice *device, PciBusAddr bus_addr, PciIntPin pin)
              bus_addr.bus, bus_addr.dev, bus_addr.func);
 
     return DeviceInterface(*this, bus_addr, pin);
+}
+
+void PciHost::registerBridge(config_class *bridge , PciBusAddr bus_Addr)
+{
+  auto map_entry = bridges.emplace(bus_Addr , bridge) ;
+  // create a map entry with the key as the PCIBusAddr (since this is unique)
+  //and value as a pointer to the config class object that called this function
+  printf("%02x:%02x.%i: Registering Bridge\n",
+         bus_Addr.bus, bus_Addr.dev, bus_Addr.func);
+    DPRINTF(PciHost, "%02x:%02x.%i: Registering Bridge\n",
+            bus_Addr.bus, bus_Addr.dev, bus_Addr.func);
+
+    fatal_if(!map_entry.second,
+             "%02x:%02x.%i: PCI bus ID collision\n",
+             bus_Addr.bus, bus_Addr.dev, bus_Addr.func);
 }
 
 PciDevice *
@@ -85,6 +106,14 @@ PciHost::getDevice(const PciBusAddr &addr) const
     auto device = devices.find(addr);
     return device != devices.end() ? device->second : nullptr;
 }
+
+// function to return a ptr to config_class if it is registered
+config_class * PciHost::getBridge(const PciBusAddr & addr)
+{
+   auto bridge = bridges.find(addr) ;
+   return bridge!=bridges.end() ? bridge->second : nullptr ;
+}
+
 
 PciHost::DeviceInterface::DeviceInterface(
     PciHost &_host,
@@ -138,17 +167,60 @@ GenericPciHost::read(PacketPtr pkt)
 {
     const auto dev_addr(decodeAddress(pkt->getAddr() - confBase));
     const Addr size(pkt->getSize());
+    uint32_t data = 0;
 
-    DPRINTF(PciHost, "%02x:%02x.%i: read: offset=0x%x, size=0x%x\n",
-            dev_addr.first.bus, dev_addr.first.dev, dev_addr.first.func,
-            dev_addr.second,
-            size);
-
+    DPRINTF(PciHost,"get addr of pkt: %#x\n",pkt->getAddr());
+    DPRINTF(PciHost,"PciHost read from %02x:%02x.%i.\n",
+            dev_addr.first.bus, dev_addr.first.dev, dev_addr.first.func);
     PciDevice *const pci_dev(getDevice(dev_addr.first));
+    config_class *registered_bridge = getBridge(dev_addr.first) ;
     if (pci_dev) {
         // @todo Remove this after testing
         pkt->headerDelay = pkt->payloadDelay = 0;
-        return pci_dev->readConfig(pkt);
+        auto ticks = pci_dev->readConfig(pkt);
+        switch (pkt->getSize())
+        {
+        case sizeof(uint8_t):
+            data = (uint32_t)pkt->getLE<uint8_t>();
+            break;
+        case sizeof(uint16_t):
+            data = (uint32_t)pkt->getLE<uint16_t>();
+            break;
+        case sizeof(uint32_t):
+            data = (uint32_t)pkt->getLE<uint32_t>();
+            break;
+        default:
+            panic("invalid read access size\n");
+        }
+        DPRINTF(PciHost, "%02x:%02x.%i: read: offset=0x%x,"
+        "size=0x%x, data=%#x\n",
+            dev_addr.first.bus, dev_addr.first.dev, dev_addr.first.func,
+            dev_addr.second,
+            size,data);
+        return ticks;
+    } else if (registered_bridge) {
+      pkt->headerDelay = pkt->payloadDelay = 0 ;
+      auto ticks = registered_bridge->readConfig(pkt) ;
+      switch (pkt->getSize())
+        {
+        case sizeof(uint8_t):
+            data = (uint32_t)pkt->getLE<uint8_t>();
+            break;
+        case sizeof(uint16_t):
+            data = (uint32_t)pkt->getLE<uint16_t>();
+            break;
+        case sizeof(uint32_t):
+            data = (uint32_t)pkt->getLE<uint32_t>();
+            break;
+        default:
+            panic("invalid read access size\n");
+        }
+      DPRINTF(PciHost, "%02x:%02x.%i: read: offset=0x%x,"
+      "size=0x%x, data=%#x\n",
+            dev_addr.first.bus, dev_addr.first.dev, dev_addr.first.func,
+            dev_addr.second,
+            size,data);
+      return ticks;
     } else {
         uint8_t *pkt_data(pkt->getPtr<uint8_t>());
         std::fill(pkt_data, pkt_data + size, 0xFF);
@@ -161,20 +233,39 @@ Tick
 GenericPciHost::write(PacketPtr pkt)
 {
     const auto dev_addr(decodeAddress(pkt->getAddr() - confBase));
-
-    DPRINTF(PciHost, "%02x:%02x.%i: write: offset=0x%x, size=0x%x\n",
+    DPRINTF(PciHost,"get addr of pkt: %#x\n",pkt->getAddr());
+    DPRINTF(PciHost,"PciHost write to %02x:%02x.%i.\n",
+            dev_addr.first.bus, dev_addr.first.dev, dev_addr.first.func);
+    PciDevice *const pci_dev(getDevice(dev_addr.first));
+    config_class * registered_bridge = getBridge(dev_addr.first) ;
+    uint32_t data = 0;
+    switch (pkt->getSize())
+    {
+    case sizeof(uint8_t):
+        data = (uint32_t)pkt->getLE<uint8_t>();
+        break;
+    case sizeof(uint16_t):
+        data = (uint32_t)pkt->getLE<uint16_t>();
+        break;
+    case sizeof(uint32_t):
+        data = (uint32_t)pkt->getLE<uint32_t>();
+        break;
+    default:
+        panic("invalid read access size\n");
+    }
+    DPRINTF(PciHost, "%02x:%02x.%i: write: offset=0x%x, size=0x%x, data=%#x\n",
             dev_addr.first.bus, dev_addr.first.dev, dev_addr.first.func,
             dev_addr.second,
-            pkt->getSize());
-
-    PciDevice *const pci_dev(getDevice(dev_addr.first));
-    panic_if(!pci_dev,
-             "%02x:%02x.%i: Write to config space on non-existent PCI device\n",
+            pkt->getSize(),data);
+    panic_if(!pci_dev && !registered_bridge,
+             "%02x:%02x.%i:"
+             "Write to config space on non-existent PCI device\n",
              dev_addr.first.bus, dev_addr.first.dev, dev_addr.first.func);
 
     // @todo Remove this after testing
     pkt->headerDelay = pkt->payloadDelay = 0;
 
+    if (registered_bridge) return registered_bridge->writeConfig(pkt);
     return pci_dev->writeConfig(pkt);
 }
 

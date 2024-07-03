@@ -96,10 +96,15 @@ class PciDevice(DmaDevice):
     cxx_header = "dev/pci/device.hh"
     abstract = True
 
+    is_invisible = Param.Bool(False, "Should this device register itself?")
+
     host = Param.PciHost(Parent.any, "PCI host")
     pci_bus = Param.Int("PCI bus")
     pci_dev = Param.Int("PCI device number")
     pci_func = Param.Int("PCI function code")
+    root_port_number = Param.UInt8(
+        0, "Root port the Pci device is situated under"
+    )
 
     pio_latency = Param.Latency("30ns", "Programmed IO latency")
     config_latency = Param.Latency("20ns", "Config read or write latency")

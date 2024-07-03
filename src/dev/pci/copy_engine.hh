@@ -63,7 +63,6 @@ class CopyEngine : public PciDevice
     class CopyEngineChannel : public Drainable, public Serializable
     {
       private:
-        DmaPort cePort;
         CopyEngine *ce;
         copy_engine_reg::ChanRegs  cr;
         int channelId;
@@ -96,7 +95,6 @@ class CopyEngine : public PciDevice
       public:
         CopyEngineChannel(CopyEngine *_ce, int cid);
         virtual ~CopyEngineChannel();
-        Port &getPort();
 
         std::string
         name()

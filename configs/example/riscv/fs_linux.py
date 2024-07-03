@@ -149,6 +149,8 @@ parser.add_argument(
 # ---------------------------- Parse Options --------------------------- #
 args = parser.parse_args()
 
+print(f"*****************\n{args}\n*****************\n")
+
 # CPU and Memory
 (CPUClass, mem_mode, FutureClass) = Simulation.setCPUClass(args)
 assert issubclass(CPUClass, RiscvCPU)

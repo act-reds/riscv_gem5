@@ -53,3 +53,14 @@ DebugFlag('PciHost')
 SimObject('CopyEngine.py', sim_objects=['CopyEngine'])
 Source('copy_engine.cc')
 DebugFlag('DMACopyEngine')
+
+SimObject('CXLMem.py', sim_objects=['CXLMem'])
+Source('CXL_mem.cc')
+
+SimObject('AccRTL.py', sim_objects=['AccRTL'])
+Source('AccRTL.cc')
+DebugFlag('AccRTLDebug')
+
+SimObject('AccMidgard.py', sim_objects=['AccMidgard'])
+Source('AccMidgard.cc')
+DebugFlag('AccMidgardDebug')

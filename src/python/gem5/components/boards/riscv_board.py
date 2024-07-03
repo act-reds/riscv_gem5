@@ -29,16 +29,23 @@ import os
 from typing import List
 
 import m5
+from m5.objects import *
 from m5.objects import (
+    AccRTL,
     AddrRange,
     BadAddr,
     Bridge,
     CowDiskImage,
+    CXL_Root_Complex,
+    CXLSwitch,
     Frequency,
     GenericRiscvPciHost,
     HiFive,
+    IdeController,
     IGbE_e1000,
+    IGbE_pcie,
     IOXBar,
+    PCIELink,
     PMAChecker,
     Port,
     RawDiskImage,
@@ -87,7 +94,6 @@ class RiscvBoard(AbstractSystemBoard, KernelDiskWorkload):
         cache_hierarchy: AbstractCacheHierarchy,
     ) -> None:
         super().__init__(clk_freq, processor, memory, cache_hierarchy)
-
         if processor.get_isa() != ISA.RISCV:
             raise Exception(
                 "The RISCVBoard requires a processor using the"
@@ -171,10 +177,164 @@ class RiscvBoard(AbstractSystemBoard, KernelDiskWorkload):
                 for dev in self._off_chip_devices
             ]
 
-            # PCI
-            self.bridge.ranges.append(AddrRange(0x2F000000, size="16MB"))
-            self.bridge.ranges.append(AddrRange(0x30000000, size="256MB"))
-            self.bridge.ranges.append(AddrRange(0x40000000, size="512MB"))
+        # PCI
+        self.bridge.ranges.append(AddrRange(0x2F000000, size="16MB"))
+        self.bridge.ranges.append(AddrRange(0x30000000, size="256MB"))
+        self.bridge.ranges.append(AddrRange(0x40000000, size="512MB"))
+
+        # # Root complex
+        # switch_up_lanes = 4
+        # lanes = 4  # 1
+        # cacheline_size = 64
+        # replay_buffer_size = 64
+        # should_print = False
+        # switch_buffer_size = 64
+        # pcie_switch_delay = "50ns"
+
+        # # Declare PCIe links to connect the root complex
+        # self.pcie_switch = PCIELink(lanes=switch_up_lanes, speed="32Gbps", mps=cacheline_size,
+        #     max_queue_size=replay_buffer_size, debug_flag=False)
+        # self.pcie_0 = PCIELink(lanes=lanes, speed="32Gbps", mps=cacheline_size,
+        #     max_queue_size=replay_buffer_size, debug_flag=False)
+        # self.pcie_1 = PCIELink(lanes=lanes, speed="32Gbps", mps=cacheline_size,
+        #     max_queue_size=replay_buffer_size, debug_flag=False)
+
+        # self.Root_Complex = CXL_Root_Complex(
+        #     is_transmit=False,
+        #     req_size=64,
+        #     resp_size=64,
+        #     delay="150ns",
+        # )
+
+        # self.Root_Complex.offset_dvsec_rp = 0x100
+        # self.Root_Complex.offset_dvsec_up = 0x100
+        # self.Root_Complex.offset_dvsec_dp = 0x100
+        # self.Root_Complex.slave = self.get_cache_hierarchy().get_mem_side_port()
+        # # self.Root_Complex.slave = self.iobus.mem_side_ports
+        # # self.Root_Complex.slave = self.bridge.mem_side_port
+        # self.Root_Complex.slave_dma1 = self.pcie_switch.upstreamMaster
+        # self.Root_Complex.slave_dma2 = self.pcie_0.upstreamMaster
+        # self.Root_Complex.slave_dma3 = self.pcie_1.upstreamMaster
+        # self.Root_Complex.master_dma = self.iobus.cpu_side_ports
+        # self.Root_Complex.master1 = self.pcie_switch.upstreamSlave
+        # self.Root_Complex.master2 = self.pcie_0.upstreamSlave
+        # self.Root_Complex.master3 = self.pcie_1.upstreamSlave
+        # self.Root_Complex.host = self.platform.pci_host
+
+        # self.ethernet5 = IGbE_e1000(
+        #     pci_bus=6,
+        #     pci_dev=0,
+        #     pci_func=0,
+        #     InterruptLine=0x1E,
+        #     InterruptPin=4,
+        #     root_port_number=1,
+        #     is_invisible=0,
+        # )
+        # self.ethernet5.pio = self.pcie_0.downstreamMaster
+        # self.ethernet5.dma = self.pcie_0.downstreamSlave
+        # self.ethernet5.host = self.platform.pci_host
+
+        # self.ethernet6 = IGbE_e1000(
+        #     pci_bus=7,
+        #     pci_dev=0,
+        #     pci_func=0,
+        #     InterruptLine=0x1E,
+        #     InterruptPin=4,
+        #     root_port_number=1,
+        #     is_invisible=0,
+        # )
+        # self.ethernet6.pio = self.pcie_1.downstreamMaster
+        # self.ethernet6.dma = self.pcie_1.downstreamSlave
+        # self.ethernet6.host = self.platform.pci_host
+
+        # self.ethernet7 = IGbE_e1000(
+        #     pci_bus=5,
+        #     pci_dev=0,
+        #     pci_func=0,
+        #     InterruptLine=0x1E,
+        #     InterruptPin=4,
+        #     root_port_number=1,
+        #     is_invisible=0,
+        # )
+        # self.ethernet7.pio = self.pcie_switch.downstreamMaster
+        # self.ethernet7.dma = self.pcie_switch.downstreamSlave
+        # self.ethernet7.host = self.platform.pci_host
+
+        # self.ide = IdeController(
+        #     disks=[],
+        #     pci_bus=7,
+        #     pci_dev=0,
+        #     pci_func=0,
+        #     InterruptLine=2,
+        #     InterruptPin=1,
+        #     root_port_number=2,
+        #     flag=0,
+        # )
+        # self.ide.pio = self.pcie_1.downstreamMaster
+        # self.ide.dma = self.pcie_1.downstreamSlave
+        # self.ide.host = self.pci_host
+        # self.ide.sid = 1
+
+        # self.switch = CXLSwitch(
+        #     pci_bus=1,
+        #     delay=pcie_switch_delay,
+        #     req_size=switch_buffer_size,
+        #     resp_size=switch_buffer_size,
+        # )
+
+        # # Declare PCIe links to connect the PCIe switch
+        # self.pcie_switch_0 = PCIELink(lanes=lanes, speed="32Gbps", mps=cacheline_size,
+        #     max_queue_size=replay_buffer_size, debug_flag=False)
+        # self.pcie_switch_1 = PCIELink(lanes=lanes, speed="32Gbps", mps=cacheline_size,
+        #     max_queue_size=replay_buffer_size, debug_flag=False)
+        # self.pcie_switch_2 = PCIELink(lanes=lanes, speed="32Gbps", mps=cacheline_size,
+        #     max_queue_size=replay_buffer_size, debug_flag=True)
+
+        # self.switch.offset_dvsec_rp = 0x100
+        # self.switch.offset_dvsec_up = 0x100
+        # self.switch.offset_dvsec_dp = 0x100
+        # self.switch.slave = self.pcie_switch.downstreamMaster
+        # self.switch.slave_dma1 = self.pcie_switch_0.upstreamMaster
+        # self.switch.slave_dma2 = self.pcie_switch_1.upstreamMaster
+        # self.switch.slave_dma3 = self.pcie_switch_2.upstreamMaster
+        # self.switch.master1 = self.pcie_switch_0.upstreamSlave
+        # self.switch.master2 = self.pcie_switch_1.upstreamSlave
+        # self.switch.master3 = self.pcie_switch_2.upstreamSlave
+        # self.switch.master_dma = self.pcie_switch.downstreamSlave
+
+        # self.switch.host = self.platform.pci_host
+
+        # # Attach any PCI devices this platform supports
+        # self.ethernet1 = IGbE_pcie(pci_bus=3, pci_dev=0, pci_func=0, InterruptLine=3,
+        #     InterruptPin=2, root_port_number=0, is_invisible=0,
+        # )
+        # self.ethernet1.pio = self.pcie_switch_0.downstreamMaster
+        # self.ethernet1.dma = self.pcie_switch_0.downstreamSlave
+        # self.ethernet1.host = self.platform.pci_host
+
+        # self.ethernet2 = IGbE_pcie(pci_bus=4, pci_dev=0, pci_func=0, InterruptLine=3,
+        #     InterruptPin=1, root_port_number=0, is_invisible=0,
+        # )  # 4
+        # self.ethernet2.pio = self.pcie_switch_1.downstreamMaster
+        # self.ethernet2.dma = self.pcie_switch_1.downstreamSlave
+        # self.ethernet2.host = self.platform.pci_host
+
+        # self.CXL_acc = AccRTL(
+        #     pci_bus=5,
+        #     pci_dev=0,
+        #     pci_func=0,
+        #     InterruptLine=0x3,
+        #     InterruptPin=3,
+        #     root_port_number=0,
+        #     is_invisible=0,
+        # )  # 5
+        # self.CXL_acc.ChanCnt = 4
+        # self.CXL_acc.pio = self.pcie_switch_2.downstreamMaster
+        # # self.CXL_acc.dram_port = self.pcie_switch_2.downstreamSlave
+        # # self.CXL_acc.dma = self.membus.cpu_side_ports
+        # self.CXL_acc.dma = self.pcie_switch_2.downstreamSlave
+        # self.CXL_acc.burstSize = 64
+        # self.CXL_acc.host = self.platform.pci_host
 
     def _setup_pma(self) -> None:
         """Set the PMA devices on each core."""
@@ -185,7 +345,7 @@ class RiscvBoard(AbstractSystemBoard, KernelDiskWorkload):
         ]
 
         # PCI
-        uncacheable_range.append(AddrRange(0x2F000000, size="16MB"))
+        # uncacheable_range.append(AddrRange(0x2F000000, size="16MB"))
         uncacheable_range.append(AddrRange(0x30000000, size="256MB"))
         uncacheable_range.append(AddrRange(0x40000000, size="512MB"))
 
@@ -409,6 +569,9 @@ class RiscvBoard(AbstractSystemBoard, KernelDiskWorkload):
         ranges += self.platform.pci_host.pciFdtAddr(space=2, addr=0)
         ranges += soc_state.addrCells(self.platform.pci_host.pci_mem_base)
         ranges += pci_state.sizeCells(0x40000000)  # Fixed size
+        print(
+            f"*****************************\n{ranges}*****************************\n"
+        )
         pci_node.append(FdtPropertyWords("ranges", ranges))
 
         # Interrupt mapping
@@ -530,3 +693,6 @@ class RiscvBoard(AbstractSystemBoard, KernelDiskWorkload):
             "disk_device={disk_device}",
             "rw",
         ]
+
+    def get_platform(self):
+        return self.platform

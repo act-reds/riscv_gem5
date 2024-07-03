@@ -394,6 +394,7 @@ class PciDevice : public DmaDevice
     void unserialize(CheckpointIn &cp) override;
 
     const PciBusAddr &busAddr() const { return _busAddr; }
+    bool is_invisible;
 };
 
 } // namespace gem5

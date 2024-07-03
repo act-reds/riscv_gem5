@@ -24,6 +24,8 @@
  * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ *
+ * Authors: Ali Saidi
  */
 
 /* @file
@@ -33,7 +35,7 @@
  * other MACs with slight modifications.
  */
 
-#include "dev/net/i8254xGBe.hh"
+#include "dev/net/i8257xGBe.hh"
 
 /*
  * @todo really there are multiple dma engines.. we should implement them.
@@ -48,18 +50,17 @@
 #include "debug/EthernetAll.hh"
 #include "mem/packet.hh"
 #include "mem/packet_access.hh"
-#include "params/IGbE.hh"
+#include "params/IGbE_pcie.hh"
 #include "sim/stats.hh"
 #include "sim/system.hh"
 
 namespace gem5
 {
-
-using namespace igbreg;
+using namespace iGbReg_pcie;
 using namespace networking;
 
-IGbE::IGbE(const Params &p)
-    : EtherDevice(p), etherInt(NULL),
+IGbE_pcie::IGbE_pcie(const Params &p)
+    : EtherDevice(p), etherInt(NULL), //cpa(NULL),
       rxFifo(p.rx_fifo_size), txFifo(p.tx_fifo_size), inTick(false),
       rxTick(false), txTick(false), txFifoTick(false), rxDmaPacket(false),
       pktOffset(0), fetchDelay(p.fetch_delay), wbDelay(p.wb_delay),
@@ -75,7 +76,7 @@ IGbE::IGbE(const Params &p)
       txDescCache(this, name()+".TxDesc", p.tx_desc_cache_size),
       lastInterrupt(0)
 {
-    etherInt = new IGbEInt(name() + ".int", this);
+    etherInt = new IGbEInt_pcie(name() + ".int", this);
 
     // Initialized internal registers per Intel documentation
     // All registers intialized to 0 by per register constructor
@@ -96,9 +97,14 @@ IGbE::IGbE(const Params &p)
     regs.tdwba = 0;
     regs.rlpml = 0;
     regs.sw_fw_sync = 0;
-
+    regs.extcnf_ctrl = 0x00000008 ; // initialized extended configuration
+                                    //and control register at 0xF00
+    regs.fcal = 0x00C28001 ;
+    regs.fcah = 0x00000100 ;
+    regs.fct = 0x00008808 ;
     regs.pba.rxa(0x30);
     regs.pba.txa(0x10);
+    regs.srrctl.desctype(1) ; // advanced descriptor
 
     eeOpBits            = 0;
     eeAddrBits          = 0;
@@ -106,20 +112,27 @@ IGbE::IGbE(const Params &p)
     eeOpcode            = 0;
 
     // clear all 64 16 bit words of the eeprom
-    memset(&flash, 0, EEPROM_SIZE * 2);
+    memset(&flash, 0, EEPROM_SIZE*2);
 
     // Set the MAC address
     memcpy(flash, p.hardware_address.bytes(), ETH_ADDR_LEN);
-    for (int x = 0; x < ETH_ADDR_LEN / 2; x++)
+    for (int x = 0; x < ETH_ADDR_LEN/2; x++)
+      {
+    //    printf("Address word is %04x\n" , flash[x]) ;
         flash[x] = htobe(flash[x]);
-
+      }
     uint16_t csum = 0;
     for (int x = 0; x < EEPROM_SIZE; x++)
-        csum += htobe(flash[x]);
+        csum += /*htobe*/(flash[x]);
+    regs.ral = ((uint32_t)htobe(flash[1])) <<16 | (uint32_t)htobe(flash[0]) ;
+    regs.rah = ((uint32_t)htobe(flash[2])) | 0x80000000 ;
+    // set address valid bit to 1 in rah
+   // printf(" RAL , RAH: %08x,%08x\n" , regs.ral, regs.rah) ;
 
 
     // Magic happy checksum value
-    flash[EEPROM_SIZE - 1] = htobe((uint16_t)(EEPROM_CSUM - csum));
+    flash[EEPROM_SIZE-1] = /*htobe*/((uint16_t)(EEPROM_CSUM - csum));
+   // printf("Calc checksum is %04x\n" , (uint16_t)(csum)) ;
 
     // Store the MAC address as queue ID
     macAddr = p.hardware_address;
@@ -128,34 +141,38 @@ IGbE::IGbE(const Params &p)
     txFifo.clear();
 }
 
-IGbE::~IGbE()
+IGbE_pcie::~IGbE_pcie()
 {
     delete etherInt;
 }
 
 void
-IGbE::init()
+IGbE_pcie::init()
 {
+    // cpa = CPA::cpa();
     PciDevice::init();
 }
 
-Port &
-IGbE::getPort(const std::string &if_name, PortID idx)
+//EtherInt*
+Port&
+IGbE_pcie::getPort(const std::string &if_name, PortID idx)
 {
-    if (if_name == "interface")
+
+    if (if_name == "interface") {
+        if (etherInt->getPeer())
+            panic("Port already connected to\n");
         return *etherInt;
+    }
+    //panic ("IGbE_pcie::getPort fell through");
     return EtherDevice::getPort(if_name, idx);
 }
 
 Tick
-IGbE::writeConfig(PacketPtr pkt)
+IGbE_pcie::writeConfig(PacketPtr pkt)
 {
     int offset = pkt->getAddr() & PCI_CONFIG_SIZE;
-        if ((offset < PCI_DEVICE_SPECIFIC) ||
-        (offset >= PMCAP_BASE && offset < (PMCAP_BASE + PMCAP_SIZE)) ||
-        (offset >= MSICAP_BASE && offset < (MSICAP_BASE + MSICAP_SIZE)) ||
-        (offset >= MSIXCAP_BASE && offset < (MSIXCAP_BASE + MSIXCAP_SIZE)) ||
-        (offset >= PXCAP_BASE && offset < (PXCAP_BASE + PXCAP_SIZE)))
+    //printf("Config write to offset %d\n" , offset);
+    if (offset < PCI_CONFIG_SIZE)
         PciDevice::writeConfig(pkt);
     else
         panic("Device specific PCI config space not implemented.\n");
@@ -171,7 +188,7 @@ IGbE::writeConfig(PacketPtr pkt)
 #define IN_RANGE(val, base, len) (val >= base && val < (base + len))
 
 Tick
-IGbE::read(PacketPtr pkt)
+IGbE_pcie::read(PacketPtr pkt)
 {
     int bar;
     Addr daddr;
@@ -191,8 +208,24 @@ IGbE::read(PacketPtr pkt)
     // Handle read of register here
     //
 
-
+   // printf("Read request to i82574 offset %lu , orig: %08x\n" ,
+   //(unsigned long)daddr , (unsigned)pkt->getAddr()) ;
     switch (daddr) {
+     // case REG_SYSTIML: pkt->setLE<uint32_t>(0x00000001) ; break ;
+      case REG_FCAL: pkt->setLE<uint32_t>(regs.fcal) ;
+                     break ;
+      case REG_FCAH: pkt->setLE<uint32_t>(regs.fcah) ;
+                     break ;
+      case REG_FCT:  pkt->setLE<uint32_t>(regs.fct) ;
+                     break ;
+      case REG_RAL:  pkt->setLE<uint32_t>(regs.ral)  ; break ;
+      case REG_RAH:  pkt->setLE<uint32_t>(regs.rah) ; break ;
+      case SYSTIML:  pkt->setLE<uint32_t>(regs.systiml) ; break ;
+      case SYSTIMH:  pkt->setLE<uint32_t>(regs.systimh) ; break ;
+      case TIMINCA:  pkt->setLE<uint32_t>(regs.timinca) ; break ;
+      case EXTCNF_CTRL:
+        pkt->setLE<uint32_t>(regs.extcnf_ctrl) ;
+        break ;
       case REG_CTRL:
         pkt->setLE<uint32_t>(regs.ctrl());
         break;
@@ -341,17 +374,22 @@ IGbE::read(PacketPtr pkt)
       case REG_FWSM:
         pkt->setLE<uint32_t>(regs.fwsm());
         break;
+
       case REG_SWFWSYNC:
         pkt->setLE<uint32_t>(regs.sw_fw_sync);
         break;
       default:
-        if (!IN_RANGE(daddr, REG_VFTA, VLAN_FILTER_TABLE_SIZE * 4) &&
-            !IN_RANGE(daddr, REG_RAL, RCV_ADDRESS_TABLE_SIZE * 8) &&
-            !IN_RANGE(daddr, REG_MTA, MULTICAST_TABLE_SIZE * 4) &&
-            !IN_RANGE(daddr, REG_CRCERRS, STATS_REGS_SIZE))
-            panic("Read request to unknown register number: %#x\n", daddr);
-        else
+        if (!IN_RANGE(daddr, REG_VFTA, VLAN_FILTER_TABLE_SIZE*4) &&
+            !IN_RANGE(daddr, REG_RAL, RCV_ADDRESS_TABLE_SIZE*8) &&
+            !IN_RANGE(daddr, REG_MTA, MULTICAST_TABLE_SIZE*4) &&
+            !IN_RANGE(daddr, REG_CRCERRS, STATS_REGS_SIZE)){
+
+           /* panic("Read request to unknown register number: %#x\n", daddr)*/
+           pkt->setLE<uint32_t>(0);
+        }
+        else{
             pkt->setLE<uint32_t>(0);
+             }
     };
 
     pkt->makeAtomicResponse();
@@ -359,14 +397,23 @@ IGbE::read(PacketPtr pkt)
 }
 
 Tick
-IGbE::write(PacketPtr pkt)
+IGbE_pcie::write(PacketPtr pkt)
 {
     int bar;
     Addr daddr;
 
 
     if (!getBAR(pkt->getAddr(), bar, daddr))
-        panic("Invalid PCI memory access to unmapped memory.\n");
+    {
+        for (int i = 0; i < BARs.size(); i++) {
+            auto *bar = BARs[i];
+            printf("bar: %#x\n",bar);
+            printf("bar->range()._start: %lu, bar->range()._end: %lu\n",
+            bar->range().start(),bar->range().end());
+        }
+        panic("Invalid PCI memory access to unmapped memory, addr: %#x.\n",
+        pkt->getAddr());
+    }
 
     // Only Memory register BAR is allowed
     assert(bar == 0);
@@ -384,8 +431,17 @@ IGbE::write(PacketPtr pkt)
 
     Regs::RCTL oldrctl;
     Regs::TCTL oldtctl;
-
+    //printf("Write request to i82574 offset %lu , orig %lu\n" ,
+    //(unsigned long)daddr , (unsigned long)pkt->getAddr()) ;
     switch (daddr) {
+
+      case EXTCNF_CTRL: regs.extcnf_ctrl = val ;
+                        break ;
+      case REG_RAL : regs.ral = val ; break ;
+      case REG_RAH:  regs.rah = val ; break ;
+      case SYSTIML:  regs.systiml = val; break ;
+      case SYSTIMH:  regs.systimh = val ; break ;
+      case TIMINCA:  regs.timinca = val ;  break ;
       case REG_CTRL:
         regs.ctrl = val;
         if (regs.ctrl.tfce())
@@ -412,12 +468,11 @@ IGbE::write(PacketPtr pkt)
                 eeAddr = eeAddr << 1 | regs.eecd.din();
                 eeAddrBits++;
             } else if (eeDataBits < 16 && eeOpcode == EEPROM_READ_OPCODE_SPI) {
-                assert(eeAddr >> 1 < EEPROM_SIZE);
+                assert(eeAddr>>1 < EEPROM_SIZE);
                 DPRINTF(EthernetEEPROM, "EEPROM bit read: %d word: %#X\n",
-                        flash[eeAddr >> 1] >> eeDataBits & 0x1,
-                        flash[eeAddr >> 1]);
-                regs.eecd.dout(
-                        (flash[eeAddr >> 1] >> (15 - eeDataBits)) & 0x1);
+                        flash[eeAddr>>1] >> eeDataBits & 0x1,
+                        flash[eeAddr>>1]);
+                regs.eecd.dout((flash[eeAddr>>1] >> (15-eeDataBits)) & 0x1);
                 eeDataBits++;
             } else if (eeDataBits < 8 && eeOpcode == EEPROM_RDSR_OPCODE_SPI) {
                 regs.eecd.dout(0);
@@ -440,7 +495,7 @@ IGbE::write(PacketPtr pkt)
 
             DPRINTF(EthernetEEPROM, "EEPROM: opcode: %#X:%d addr: %#X:%d\n",
                     (uint32_t)eeOpcode, (uint32_t) eeOpBits,
-                    (uint32_t)eeAddr >> 1, (uint32_t)eeAddrBits);
+                    (uint32_t)eeAddr>>1, (uint32_t)eeAddrBits);
             if (eeOpBits == 8 && !(eeOpcode == EEPROM_READ_OPCODE_SPI ||
                                    eeOpcode == EEPROM_RDSR_OPCODE_SPI ))
                 panic("Unknown eeprom opcode: %#X:%d\n", (uint32_t)eeOpcode,
@@ -500,7 +555,7 @@ IGbE::write(PacketPtr pkt)
                 regs.icr(), regs.imr, regs.iam, regs.ctrl_ext.iame());
         if (regs.ctrl_ext.iame())
             regs.imr &= ~regs.iam;
-        regs.icr = ~bits(val, 30, 0) & regs.icr();
+        regs.icr = ~bits(val,30,0) & regs.icr();
         chkInterrupt();
         break;
       case REG_ITR:
@@ -508,6 +563,7 @@ IGbE::write(PacketPtr pkt)
         break;
       case REG_ICS:
         DPRINTF(EthernetIntr, "Posting interrupt because of ICS write\n");
+      //  printf("Psting interrupt ICS written\n");
         postInterrupt((IntTypes)val);
         break;
       case REG_IMS:
@@ -556,9 +612,9 @@ IGbE::write(PacketPtr pkt)
       case REG_WUFC:
       case REG_WUS:
       case REG_LEDCTL:
-      case REG_FCAL:
-      case REG_FCAH:
-      case REG_FCT:
+      case REG_FCAL: regs.fcal = val ; break ;
+      case REG_FCAH: regs.fcah = val ; break ;
+      case REG_FCT:  regs.fct = val ; break ;
       case REG_VET:
       case REG_AIFS:
       case REG_TIPG:
@@ -574,7 +630,7 @@ IGbE::write(PacketPtr pkt)
         regs.fcrth = val;
         break;
       case REG_RDBAL:
-        regs.rdba.rdbal(val & ~mask(4));
+        regs.rdba.rdbal( val & ~mask(4));
         rxDescCache.areaChanged();
         break;
       case REG_RDBAH:
@@ -612,10 +668,14 @@ IGbE::write(PacketPtr pkt)
         regs.rxdctl = val;
         break;
       case REG_TDBAL:
-        regs.tdba.tdbal(val & ~mask(4));
+      //  printf("Transmit descriptor base address low is %08x\n" ,
+      // (unsigned int)val) ;
+        regs.tdba.tdbal( val & ~mask(4));
         txDescCache.areaChanged();
         break;
       case REG_TDBAH:
+      //  printf("Transmit descriptor base address high is %08x\n" ,
+      // (unsigned int)val) ;
         regs.tdba.tdbah(val);
         txDescCache.areaChanged();
         break;
@@ -624,6 +684,7 @@ IGbE::write(PacketPtr pkt)
         txDescCache.areaChanged();
         break;
       case REG_TDH:
+      //  printf("Transmit descriptor head is %08x\n" , (unsigned int)val) ;
         regs.tdh = val;
         txDescCache.areaChanged();
         break;
@@ -633,12 +694,16 @@ IGbE::write(PacketPtr pkt)
             panic("No support for DCA\n");
         break;
       case REG_TDT:
+       // printf("Transmit descriptor tail updated to %08x\n",
+       // (unsigned int)val) ;
         regs.tdt = val;
-        DPRINTF(EthernetSM, "TXS: TX Tail pointer updated\n");
+        DPRINTF(EthernetSM, "TXS: TX Tail pointer updated \n");
         if (drainState() == DrainState::Running) {
+         //   printf("Fetching descriptors\n");
             DPRINTF(EthernetSM, "TXS: TDT Fetching Descriptors!\n");
             txDescCache.fetchDescriptors();
         } else {
+           // printf("Not fetching descriptors because draining\n") ;
             DPRINTF(EthernetSM, "TXS: TDT NOT Fetching Desc b/c draining!\n");
         }
         break;
@@ -671,8 +736,8 @@ IGbE::write(PacketPtr pkt)
         break;
       case REG_RFCTL:
         regs.rfctl = val;
-        if (regs.rfctl.exsten())
-            panic("Extended RX descriptors not implemented\n");
+        // if (regs.rfctl.exsten())
+          //  panic("Extended RX descriptors not implemented\n");
         break;
       case REG_MANC:
         regs.manc = val;
@@ -686,18 +751,20 @@ IGbE::write(PacketPtr pkt)
         regs.sw_fw_sync = val;
         break;
       default:
-        if (!IN_RANGE(daddr, REG_VFTA, VLAN_FILTER_TABLE_SIZE * 4) &&
-            !IN_RANGE(daddr, REG_RAL, RCV_ADDRESS_TABLE_SIZE * 8) &&
-            !IN_RANGE(daddr, REG_MTA, MULTICAST_TABLE_SIZE * 4))
-            panic("Write request to unknown register number: %#x\n", daddr);
+        if (!IN_RANGE(daddr, REG_VFTA, VLAN_FILTER_TABLE_SIZE*4) &&
+            !IN_RANGE(daddr, REG_RAL, RCV_ADDRESS_TABLE_SIZE*8) &&
+            !IN_RANGE(daddr, REG_MTA, MULTICAST_TABLE_SIZE*4)) {
+           /* panic("Write request to unknown register number:
+           %#x\n", daddr)*/;
+           }
     };
-
+    //printf("Value of Extended Config is %04x\n", regs.extcnf_ctrl) ;
     pkt->makeAtomicResponse();
     return pioDelay;
 }
 
 void
-IGbE::postInterrupt(IntTypes t, bool now)
+IGbE_pcie::postInterrupt(IntTypes t, bool now)
 {
     assert(t);
 
@@ -730,19 +797,20 @@ IGbE::postInterrupt(IntTypes t, bool now)
 }
 
 void
-IGbE::delayIntEvent()
+IGbE_pcie::delayIntEvent()
 {
     cpuPostInt();
 }
 
 
 void
-IGbE::cpuPostInt()
+IGbE_pcie::cpuPostInt()
 {
 
     etherDeviceStats.postedInterrupts++;
 
     if (!(regs.icr() & regs.imr)) {
+      //  printf("Interrupt masked\n");
         DPRINTF(Ethernet, "Interrupt Masked. Not Posting\n");
         return;
     }
@@ -776,12 +844,12 @@ IGbE::cpuPostInt()
             regs.icr());
 
     intrPost();
-
+   // printf("Posted interrupt\n");
     lastInterrupt = curTick();
 }
 
 void
-IGbE::cpuClearInt()
+IGbE_pcie::cpuClearInt()
 {
     if (regs.icr.int_assert()) {
         regs.icr.int_assert(0);
@@ -793,7 +861,7 @@ IGbE::cpuClearInt()
 }
 
 void
-IGbE::chkInterrupt()
+IGbE_pcie::chkInterrupt()
 {
     DPRINTF(Ethernet, "Checking interrupts icr: %#x imr: %#x\n", regs.icr(),
             regs.imr);
@@ -816,7 +884,7 @@ IGbE::chkInterrupt()
                     "Possibly scheduling interrupt because of imr write\n");
             if (!interEvent.scheduled()) {
                 Tick t = curTick() +
-                    sim_clock::as_int::ns * 256 * regs.itr.interval();
+                sim_clock::as_int::ns * 256 * regs.itr.interval();
                 DPRINTF(Ethernet, "Scheduling for %d\n", t);
                 schedule(interEvent, t);
             }
@@ -828,7 +896,7 @@ IGbE::chkInterrupt()
 ///////////////////////////// IGbE::DescCache //////////////////////////////
 
 template<class T>
-IGbE::DescCache<T>::DescCache(IGbE *i, const std::string n, int s)
+IGbE_pcie::DescCache<T>::DescCache(IGbE_pcie *i, const std::string n, int s)
     : igbe(i), _name(n), cachePnt(0), size(s), curFetching(0),
       wbOut(0), moreToWb(false), wbAlignment(0), pktPtr(NULL),
       wbDelayEvent([this]{ writeback1(); }, n),
@@ -841,7 +909,7 @@ IGbE::DescCache<T>::DescCache(IGbE *i, const std::string n, int s)
 }
 
 template<class T>
-IGbE::DescCache<T>::~DescCache()
+IGbE_pcie::DescCache<T>::~DescCache()
 {
     reset();
     delete[] fetchBuf;
@@ -850,7 +918,7 @@ IGbE::DescCache<T>::~DescCache()
 
 template<class T>
 void
-IGbE::DescCache<T>::areaChanged()
+IGbE_pcie::DescCache<T>::areaChanged()
 {
     if (usedCache.size() > 0 || curFetching || wbOut)
         panic("Descriptor Address, Length or Head changed. Bad\n");
@@ -860,7 +928,7 @@ IGbE::DescCache<T>::areaChanged()
 
 template<class T>
 void
-IGbE::DescCache<T>::writeback(Addr aMask)
+IGbE_pcie::DescCache<T>::writeback(Addr aMask)
 {
     int curHead = descHead();
     int max_to_wb = usedCache.size();
@@ -897,18 +965,24 @@ IGbE::DescCache<T>::writeback(Addr aMask)
 
     DPRINTF(EthernetDesc, "Writing back %d descriptors\n", max_to_wb);
 
-    if (max_to_wb <= 0)
+    if (max_to_wb <= 0) {
+        // if (usedCache.size())
+        //     igbe->anBegin(annSmWb, "Wait Alignment", CPA::FL_WAIT);
+        // else
+        //     igbe->anWe(annSmWb, annUsedCacheQ);
         return;
+    }
 
     wbOut = max_to_wb;
 
     assert(!wbDelayEvent.scheduled());
     igbe->schedule(wbDelayEvent, curTick() + igbe->wbDelay);
+    // igbe->anBegin(annSmWb, "Prepare Writeback Desc");
 }
 
 template<class T>
 void
-IGbE::DescCache<T>::writeback1()
+IGbE_pcie::DescCache<T>::writeback1()
 {
     // If we're draining delay issuing this DMA
     if (igbe->drainState() != DrainState::Running) {
@@ -921,18 +995,23 @@ IGbE::DescCache<T>::writeback1()
     for (int x = 0; x < wbOut; x++) {
         assert(usedCache.size());
         memcpy(&wbBuf[x], usedCache[x], sizeof(T));
+        // igbe->anPq(annSmWb, annUsedCacheQ);
+        // igbe->anPq(annSmWb, annDescQ);
+        // igbe->anQ(annSmWb, annUsedDescQ);
     }
 
 
+    // igbe->anBegin(annSmWb, "Writeback Desc DMA");
+
     assert(wbOut);
     igbe->dmaWrite(pciToDma(descBase() + descHead() * sizeof(T)),
-                   wbOut * sizeof(T), &wbEvent, (uint8_t *)wbBuf,
+                   wbOut * sizeof(T), &wbEvent, (uint8_t*)wbBuf,
                    igbe->wbCompDelay);
 }
 
 template<class T>
 void
-IGbE::DescCache<T>::fetchDescriptors()
+IGbE_pcie::DescCache<T>::fetchDescriptors()
 {
     size_t max_to_fetch;
 
@@ -949,6 +1028,18 @@ IGbE::DescCache<T>::fetchDescriptors()
         max_to_fetch = descLen() - cachePnt;
 
     size_t free_cache = size - usedCache.size() - unusedCache.size();
+
+    // if (!max_to_fetch)
+    //     igbe->anWe(annSmFetch, annUnusedDescQ);
+    // else
+    //     igbe->anPq(annSmFetch, annUnusedDescQ, max_to_fetch);
+
+    if (max_to_fetch) {
+        // if (!free_cache)
+        //     igbe->anWf(annSmFetch, annDescQ);
+        // else
+        //     igbe->anRq(annSmFetch, annDescQ, free_cache);
+    }
 
     max_to_fetch = std::min(max_to_fetch, free_cache);
 
@@ -967,11 +1058,12 @@ IGbE::DescCache<T>::fetchDescriptors()
 
     assert(!fetchDelayEvent.scheduled());
     igbe->schedule(fetchDelayEvent, curTick() + igbe->fetchDelay);
+    // igbe->anBegin(annSmFetch, "Prepare Fetch Desc");
 }
 
 template<class T>
 void
-IGbE::DescCache<T>::fetchDescriptors1()
+IGbE_pcie::DescCache<T>::fetchDescriptors1()
 {
     // If we're draining delay issuing this DMA
     if (igbe->drainState() != DrainState::Running) {
@@ -979,29 +1071,37 @@ IGbE::DescCache<T>::fetchDescriptors1()
         return;
     }
 
+    // igbe->anBegin(annSmFetch, "Fetch Desc");
+
     DPRINTF(EthernetDesc, "Fetching descriptors at %#x (%#x), size: %#x\n",
             descBase() + cachePnt * sizeof(T),
             pciToDma(descBase() + cachePnt * sizeof(T)),
             curFetching * sizeof(T));
     assert(curFetching);
     igbe->dmaRead(pciToDma(descBase() + cachePnt * sizeof(T)),
-                  curFetching * sizeof(T), &fetchEvent, (uint8_t *)fetchBuf,
+                  curFetching * sizeof(T), &fetchEvent, (uint8_t*)fetchBuf,
                   igbe->fetchCompDelay);
 }
 
 template<class T>
 void
-IGbE::DescCache<T>::fetchComplete()
+IGbE_pcie::DescCache<T>::fetchComplete()
 {
     T *newDesc;
+    // igbe->anBegin(annSmFetch, "Fetch Complete");
     for (int x = 0; x < curFetching; x++) {
         newDesc = new T;
         memcpy(newDesc, &fetchBuf[x], sizeof(T));
         unusedCache.push_back(newDesc);
+        // igbe->anDq(annSmFetch, annUnusedDescQ);
+        // igbe->anQ(annSmFetch, annUnusedCacheQ);
+        // igbe->anQ(annSmFetch, annDescQ);
     }
 
 
+#ifndef NDEBUG
     int oldCp = cachePnt;
+#endif
 
     cachePnt += curFetching;
     assert(cachePnt <= descLen());
@@ -1013,22 +1113,39 @@ IGbE::DescCache<T>::fetchComplete()
     DPRINTF(EthernetDesc, "Fetching complete cachePnt %d -> %d\n",
             oldCp, cachePnt);
 
+    // if ((descTail() >= cachePnt ? (descTail() - cachePnt) : (descLen() -
+    // cachePnt)) == 0)
+    // {
+    //     igbe->anWe(annSmFetch, annUnusedDescQ);
+    // } else if (!(size - usedCache.size() - unusedCache.size())) {
+    //     igbe->anWf(annSmFetch, annDescQ);
+    // } else {
+    //     igbe->anBegin(annSmFetch, "Wait", CPA::FL_WAIT);
+    // }
+
     enableSm();
     igbe->checkDrain();
 }
 
 template<class T>
 void
-IGbE::DescCache<T>::wbComplete()
+IGbE_pcie::DescCache<T>::wbComplete()
 {
 
-    long curHead = descHead();
+    // igbe->anBegin(annSmWb, "Finish Writeback");
+
+    long  curHead = descHead();
+#ifndef NDEBUG
     long oldHead = curHead;
+#endif
 
     for (int x = 0; x < wbOut; x++) {
         assert(usedCache.size());
         delete usedCache[0];
         usedCache.pop_front();
+
+        // igbe->anDq(annSmWb, annUsedCacheQ);
+        // igbe->anDq(annSmWb, annDescQ);
     }
 
     curHead += wbOut;
@@ -1051,14 +1168,19 @@ IGbE::DescCache<T>::wbComplete()
         writeback(wbAlignment);
     }
 
-    if (!wbOut)
+    if (!wbOut) {
         igbe->checkDrain();
+        // if (usedCache.size())
+        //     igbe->anBegin(annSmWb, "Wait", CPA::FL_WAIT);
+        // else
+        //     igbe->anWe(annSmWb, annUsedCacheQ);
+    }
     fetchAfterWb();
 }
 
 template<class T>
 void
-IGbE::DescCache<T>::reset()
+IGbE_pcie::DescCache<T>::reset()
 {
     DPRINTF(EthernetDesc, "Reseting descriptor cache\n");
     for (typename CacheType::size_type x = 0; x < usedCache.size(); x++)
@@ -1075,7 +1197,7 @@ IGbE::DescCache<T>::reset()
 
 template<class T>
 void
-IGbE::DescCache<T>::serialize(CheckpointOut &cp) const
+IGbE_pcie::DescCache<T>::serialize(CheckpointOut &cp) const
 {
     SERIALIZE_SCALAR(cachePnt);
     SERIALIZE_SCALAR(curFetching);
@@ -1087,14 +1209,14 @@ IGbE::DescCache<T>::serialize(CheckpointOut &cp) const
     SERIALIZE_SCALAR(usedCacheSize);
     for (typename CacheType::size_type x = 0; x < usedCacheSize; x++) {
         arrayParamOut(cp, csprintf("usedCache_%d", x),
-                      (uint8_t *)usedCache[x], sizeof(T));
+                      (uint8_t*)usedCache[x],sizeof(T));
     }
 
     typename CacheType::size_type unusedCacheSize = unusedCache.size();
     SERIALIZE_SCALAR(unusedCacheSize);
     for (typename CacheType::size_type x = 0; x < unusedCacheSize; x++) {
         arrayParamOut(cp, csprintf("unusedCache_%d", x),
-                      (uint8_t *)unusedCache[x], sizeof(T));
+                      (uint8_t*)unusedCache[x],sizeof(T));
     }
 
     Tick fetch_delay = 0, wb_delay = 0;
@@ -1110,7 +1232,7 @@ IGbE::DescCache<T>::serialize(CheckpointOut &cp) const
 
 template<class T>
 void
-IGbE::DescCache<T>::unserialize(CheckpointIn &cp)
+IGbE_pcie::DescCache<T>::unserialize(CheckpointIn &cp)
 {
     UNSERIALIZE_SCALAR(cachePnt);
     UNSERIALIZE_SCALAR(curFetching);
@@ -1124,7 +1246,7 @@ IGbE::DescCache<T>::unserialize(CheckpointIn &cp)
     for (typename CacheType::size_type x = 0; x < usedCacheSize; x++) {
         temp = new T;
         arrayParamIn(cp, csprintf("usedCache_%d", x),
-                     (uint8_t *)temp, sizeof(T));
+                     (uint8_t*)temp,sizeof(T));
         usedCache.push_back(temp);
     }
 
@@ -1133,7 +1255,7 @@ IGbE::DescCache<T>::unserialize(CheckpointIn &cp)
     for (typename CacheType::size_type x = 0; x < unusedCacheSize; x++) {
         temp = new T;
         arrayParamIn(cp, csprintf("unusedCache_%d", x),
-                     (uint8_t *)temp, sizeof(T));
+                     (uint8_t*)temp,sizeof(T));
         unusedCache.push_back(temp);
     }
     Tick fetch_delay = 0, wb_delay = 0;
@@ -1149,7 +1271,7 @@ IGbE::DescCache<T>::unserialize(CheckpointIn &cp)
 
 ///////////////////////////// IGbE::RxDescCache //////////////////////////////
 
-IGbE::RxDescCache::RxDescCache(IGbE *i, const std::string n, int s)
+IGbE_pcie::RxDescCache::RxDescCache(IGbE_pcie *i, const std::string n, int s)
     : DescCache<RxDesc>(i, n, s), pktDone(false), splitCount(0),
     pktEvent([this]{ pktComplete(); }, n),
     pktHdrEvent([this]{ pktSplitDone(); }, n),
@@ -1166,7 +1288,7 @@ IGbE::RxDescCache::RxDescCache(IGbE *i, const std::string n, int s)
 }
 
 void
-IGbE::RxDescCache::pktSplitDone()
+IGbE_pcie::RxDescCache::pktSplitDone()
 {
     splitCount++;
     DPRINTF(EthernetDesc,
@@ -1181,7 +1303,7 @@ IGbE::RxDescCache::pktSplitDone()
 }
 
 int
-IGbE::RxDescCache::writePacket(EthPacketPtr packet, int pkt_offset)
+IGbE_pcie::RxDescCache::writePacket(EthPacketPtr packet, int pkt_offset)
 {
     assert(unusedCache.size());
     //if (!unusedCache.size())
@@ -1199,6 +1321,7 @@ IGbE::RxDescCache::writePacket(EthPacketPtr packet, int pkt_offset)
         DPRINTF(EthernetDesc, "Packet Length: %d Desc Size: %d\n",
                 packet->length, igbe->regs.rctl.descSize());
         assert(packet->length < igbe->regs.rctl.descSize());
+       // printf("Writing through DMA 1\n") ;
         igbe->dmaWrite(pciToDma(desc->legacy.buf),
                        packet->length, &pktEvent, packet->data,
                        igbe->rxWriteDelay);
@@ -1211,6 +1334,7 @@ IGbE::RxDescCache::writePacket(EthPacketPtr packet, int pkt_offset)
         DPRINTF(EthernetDesc, "Packet Length: %d srrctl: %#x Desc Size: %d\n",
                 packet->length, igbe->regs.srrctl(), buf_len);
         assert(packet->length < buf_len);
+        //printf("Writing through DMA2\n") ;
         igbe->dmaWrite(pciToDma(desc->adv_read.pkt),
                        packet->length, &pktEvent, packet->data,
                        igbe->rxWriteDelay);
@@ -1237,6 +1361,7 @@ IGbE::RxDescCache::writePacket(EthPacketPtr packet, int pkt_offset)
             bytesCopied = packet->length;
             assert(pkt_offset == 0);
             DPRINTF(EthernetDesc, "Hdr split: Entire packet in header\n");
+          //  printf("Writing to DMA3 \n") ;
             igbe->dmaWrite(pciToDma(desc->adv_read.hdr),
                            packet->length, &pktEvent, packet->data,
                            igbe->rxWriteDelay);
@@ -1284,16 +1409,20 @@ IGbE::RxDescCache::writePacket(EthPacketPtr packet, int pkt_offset)
         panic("Unimplemnted RX receive buffer type: %d\n",
               igbe->regs.srrctl.desctype());
     }
+   // printf("Bytes copied in rx desc is %d\n" , (int)bytesCopied) ;
     return bytesCopied;
 
 }
 
 void
-IGbE::RxDescCache::pktComplete()
+IGbE_pcie::RxDescCache::pktComplete()
 {
+   // printf("Checking if pkt is complete\n") ;
     assert(unusedCache.size());
     RxDesc *desc;
     desc = unusedCache.front();
+
+    // igbe->anBegin("RXS", "Update Desc");
 
     uint16_t crcfixup = igbe->regs.rctl.secrc() ? 0 : 4 ;
     DPRINTF(EthernetDesc, "pktPtr->length: %d bytesCopied: %d "
@@ -1319,51 +1448,52 @@ IGbE::RxDescCache::pktComplete()
         status |= RXDS_EOP;
 
     IpPtr ip(pktPtr);
-    Ip6Ptr ip6(pktPtr);
 
-    if (ip || ip6) {
-        if (ip) {
-            DPRINTF(EthernetDesc, "Proccesing Ip packet with Id=%d\n",
-                    ip->id());
-            ptype |= RXDP_IPV4;
-            ip_id = ip->id();
-        }
-        if (ip6)
-            ptype |= RXDP_IPV6;
+    if (ip) {
+        DPRINTF(EthernetDesc, "Proccesing Ip packet with Id=%d\n", ip->id());
+        ptype |= RXDP_IPV4;
+        ip_id = ip->id();
 
-        if (ip && igbe->regs.rxcsum.ipofld()) {
+        if (igbe->regs.rxcsum.ipofld()) {
             DPRINTF(EthernetDesc, "Checking IP checksum\n");
+     //       printf("Checking ip checksum\n") ;
             status |= RXDS_IPCS;
             csum = htole(cksum(ip));
             igbe->etherDeviceStats.rxIpChecksums++;
             if (cksum(ip) != 0) {
                 err |= RXDE_IPE;
                 ext_err |= RXDEE_IPE;
+       //         printf("Bad checksum\n") ;
                 DPRINTF(EthernetDesc, "Checksum is bad!!\n");
             }
         }
-        TcpPtr tcp = ip ? TcpPtr(ip) : TcpPtr(ip6);
+        TcpPtr tcp(ip);
         if (tcp && igbe->regs.rxcsum.tuofld()) {
+         //   printf("Checking TCP checksum\n") ;
             DPRINTF(EthernetDesc, "Checking TCP checksum\n");
             status |= RXDS_TCPCS;
             ptype |= RXDP_TCP;
             csum = htole(cksum(tcp));
             igbe->etherDeviceStats.rxTcpChecksums++;
             if (cksum(tcp) != 0) {
+           //     printf("Bad TCP checksum\n") ;
                 DPRINTF(EthernetDesc, "Checksum is bad!!\n");
                 err |= RXDE_TCPE;
                 ext_err |= RXDEE_TCPE;
             }
+
         }
 
-        UdpPtr udp = ip ? UdpPtr(ip) : UdpPtr(ip6);
+        UdpPtr udp(ip);
         if (udp && igbe->regs.rxcsum.tuofld()) {
             DPRINTF(EthernetDesc, "Checking UDP checksum\n");
+           // printf("Checking  udp checksum\n") ;
             status |= RXDS_UDPCS;
             ptype |= RXDP_UDP;
             csum = htole(cksum(udp));
             igbe->etherDeviceStats.rxUdpChecksums++;
             if (cksum(udp) != 0) {
+             //   printf("Bad udp checksum\n") ;
                 DPRINTF(EthernetDesc, "Checksum is bad!!\n");
                 ext_err |= RXDEE_TCPE;
                 err |= RXDE_TCPE;
@@ -1372,9 +1502,11 @@ IGbE::RxDescCache::pktComplete()
     } else { // if ip
         DPRINTF(EthernetSM, "Proccesing Non-Ip packet\n");
     }
+  // printf("Updating descriptors\n") ;
 
     switch (igbe->regs.srrctl.desctype()) {
       case RXDT_LEGACY:
+
         desc->legacy.len = htole((uint16_t)(pktPtr->length + crcfixup));
         desc->legacy.status = htole(status);
         desc->legacy.errors = htole(err);
@@ -1445,13 +1577,16 @@ IGbE::RxDescCache::pktComplete()
     enableSm();
     pktDone = true;
 
+    // igbe->anBegin("RXS", "Done Updating Desc");
     DPRINTF(EthernetDesc, "Processing of this descriptor complete\n");
+    // igbe->anDq("RXS", annUnusedCacheQ);
     unusedCache.pop_front();
+    // igbe->anQ("RXS", annUsedCacheQ);
     usedCache.push_back(desc);
 }
 
 void
-IGbE::RxDescCache::enableSm()
+IGbE_pcie::RxDescCache::enableSm()
 {
     if (igbe->drainState() != DrainState::Draining) {
         igbe->rxTick = true;
@@ -1460,7 +1595,7 @@ IGbE::RxDescCache::enableSm()
 }
 
 bool
-IGbE::RxDescCache::packetDone()
+IGbE_pcie::RxDescCache::packetDone()
 {
     if (pktDone) {
         pktDone = false;
@@ -1470,7 +1605,7 @@ IGbE::RxDescCache::packetDone()
 }
 
 bool
-IGbE::RxDescCache::hasOutstandingEvents()
+IGbE_pcie::RxDescCache::hasOutstandingEvents()
 {
     return pktEvent.scheduled() || wbEvent.scheduled() ||
         fetchEvent.scheduled() || pktHdrEvent.scheduled() ||
@@ -1479,7 +1614,7 @@ IGbE::RxDescCache::hasOutstandingEvents()
 }
 
 void
-IGbE::RxDescCache::serialize(CheckpointOut &cp) const
+IGbE_pcie::RxDescCache::serialize(CheckpointOut &cp) const
 {
     DescCache<RxDesc>::serialize(cp);
     SERIALIZE_SCALAR(pktDone);
@@ -1488,7 +1623,7 @@ IGbE::RxDescCache::serialize(CheckpointOut &cp) const
 }
 
 void
-IGbE::RxDescCache::unserialize(CheckpointIn &cp)
+IGbE_pcie::RxDescCache::unserialize(CheckpointIn &cp)
 {
     DescCache<RxDesc>::unserialize(cp);
     UNSERIALIZE_SCALAR(pktDone);
@@ -1499,8 +1634,8 @@ IGbE::RxDescCache::unserialize(CheckpointIn &cp)
 
 ///////////////////////////// IGbE::TxDescCache //////////////////////////////
 
-IGbE::TxDescCache::TxDescCache(IGbE *i, const std::string n, int s)
-    : DescCache<TxDesc>(i, n, s), pktDone(false), isTcp(false),
+IGbE_pcie::TxDescCache::TxDescCache(IGbE_pcie *i, const std::string n, int s)
+    : DescCache<TxDesc>(i,n, s), pktDone(false), isTcp(false),
       pktWaiting(false), pktMultiDesc(false),
       completionAddress(0), completionEnabled(false),
       useTso(false), tsoHeaderLen(0), tsoMss(0), tsoTotalLen(0), tsoUsedLen(0),
@@ -1520,7 +1655,7 @@ IGbE::TxDescCache::TxDescCache(IGbE *i, const std::string n, int s)
 }
 
 void
-IGbE::TxDescCache::processContextDesc()
+IGbE_pcie::TxDescCache::processContextDesc()
 {
     assert(unusedCache.size());
     TxDesc *desc;
@@ -1528,7 +1663,7 @@ IGbE::TxDescCache::processContextDesc()
     DPRINTF(EthernetDesc, "Checking and  processing context descriptors\n");
 
     while (!useTso && unusedCache.size() &&
-           txd_op::isContext(unusedCache.front())) {
+           TxdOp::isContext(unusedCache.front())) {
         DPRINTF(EthernetDesc, "Got context descriptor type...\n");
 
         desc = unusedCache.front();
@@ -1537,19 +1672,19 @@ IGbE::TxDescCache::processContextDesc()
 
 
         // is this going to be a tcp or udp packet?
-        isTcp = txd_op::tcp(desc) ? true : false;
+        isTcp = TxdOp::tcp(desc) ? true : false;
 
         // setup all the TSO variables, they'll be ignored if we don't use
         // tso for this connection
-        tsoHeaderLen = txd_op::hdrlen(desc);
-        tsoMss  = txd_op::mss(desc);
+        tsoHeaderLen = TxdOp::hdrlen(desc);
+        tsoMss  = TxdOp::mss(desc);
 
-        if (txd_op::isType(desc, txd_op::TXD_CNXT) && txd_op::tse(desc)) {
+        if (TxdOp::isType(desc, TxdOp::TXD_CNXT) && TxdOp::tse(desc)) {
             DPRINTF(EthernetDesc, "TCP offload enabled for packet hdrlen: "
-                    "%d mss: %d paylen %d\n", txd_op::hdrlen(desc),
-                    txd_op::mss(desc), txd_op::getLen(desc));
+                    "%d mss: %d paylen %d\n", TxdOp::hdrlen(desc),
+                    TxdOp::mss(desc), TxdOp::getLen(desc));
             useTso = true;
-            tsoTotalLen = txd_op::getLen(desc);
+            tsoTotalLen = TxdOp::getLen(desc);
             tsoLoadedHeader = false;
             tsoDescBytesUsed = 0;
             tsoUsedLen = 0;
@@ -1559,22 +1694,24 @@ IGbE::TxDescCache::processContextDesc()
             tsoCopyBytes = 0;
         }
 
-        txd_op::setDd(desc);
+        TxdOp::setDd(desc);
         unusedCache.pop_front();
+        // igbe->anDq("TXS", annUnusedCacheQ);
         usedCache.push_back(desc);
+        // igbe->anQ("TXS", annUsedCacheQ);
     }
 
     if (!unusedCache.size())
         return;
 
     desc = unusedCache.front();
-    if (!useTso && txd_op::isType(desc, txd_op::TXD_ADVDATA) &&
-        txd_op::tse(desc)) {
+    if (!useTso && TxdOp::isType(desc, TxdOp::TXD_ADVDATA) &&
+        TxdOp::tse(desc)) {
         DPRINTF(EthernetDesc, "TCP offload(adv) enabled for packet "
                 "hdrlen: %d mss: %d paylen %d\n",
-                tsoHeaderLen, tsoMss, txd_op::getTsoLen(desc));
+                tsoHeaderLen, tsoMss, TxdOp::getTsoLen(desc));
         useTso = true;
-        tsoTotalLen = txd_op::getTsoLen(desc);
+        tsoTotalLen = TxdOp::getTsoLen(desc);
         tsoLoadedHeader = false;
         tsoDescBytesUsed = 0;
         tsoUsedLen = 0;
@@ -1586,16 +1723,16 @@ IGbE::TxDescCache::processContextDesc()
     if (useTso && !tsoLoadedHeader) {
         // we need to fetch a header
         DPRINTF(EthernetDesc, "Starting DMA of TSO header\n");
-        assert(txd_op::isData(desc) && txd_op::getLen(desc) >= tsoHeaderLen);
+        assert(TxdOp::isData(desc) && TxdOp::getLen(desc) >= tsoHeaderLen);
         pktWaiting = true;
         assert(tsoHeaderLen <= 256);
-        igbe->dmaRead(pciToDma(txd_op::getBuf(desc)),
+        igbe->dmaRead(pciToDma(TxdOp::getBuf(desc)),
                       tsoHeaderLen, &headerEvent, tsoHeader, 0);
     }
 }
 
 void
-IGbE::TxDescCache::headerComplete()
+IGbE_pcie::TxDescCache::headerComplete()
 {
     DPRINTF(EthernetDesc, "TSO: Fetching TSO header complete\n");
     pktWaiting = false;
@@ -1603,9 +1740,9 @@ IGbE::TxDescCache::headerComplete()
     assert(unusedCache.size());
     TxDesc *desc = unusedCache.front();
     DPRINTF(EthernetDesc, "TSO: len: %d tsoHeaderLen: %d\n",
-            txd_op::getLen(desc), tsoHeaderLen);
+            TxdOp::getLen(desc), tsoHeaderLen);
 
-    if (txd_op::getLen(desc) == tsoHeaderLen) {
+    if (TxdOp::getLen(desc) == tsoHeaderLen) {
         tsoDescBytesUsed = 0;
         tsoLoadedHeader = true;
         unusedCache.pop_front();
@@ -1620,7 +1757,7 @@ IGbE::TxDescCache::headerComplete()
 }
 
 unsigned
-IGbE::TxDescCache::getPacketSize(EthPacketPtr p)
+IGbE_pcie::TxDescCache::getPacketSize(EthPacketPtr p)
 {
     if (!unusedCache.size())
         return 0;
@@ -1639,28 +1776,28 @@ IGbE::TxDescCache::getPacketSize(EthPacketPtr p)
 
         if (tsoPktHasHeader)
             tsoCopyBytes =  std::min((tsoMss + tsoHeaderLen) - p->length,
-                                     txd_op::getLen(desc) - tsoDescBytesUsed);
+                                     TxdOp::getLen(desc) - tsoDescBytesUsed);
         else
             tsoCopyBytes =  std::min(tsoMss,
-                                     txd_op::getLen(desc) - tsoDescBytesUsed);
+                                     TxdOp::getLen(desc) - tsoDescBytesUsed);
         unsigned pkt_size =
             tsoCopyBytes + (tsoPktHasHeader ? 0 : tsoHeaderLen);
 
         DPRINTF(EthernetDesc, "TSO: descBytesUsed: %d copyBytes: %d "
                 "this descLen: %d\n",
-                tsoDescBytesUsed, tsoCopyBytes, txd_op::getLen(desc));
+                tsoDescBytesUsed, tsoCopyBytes, TxdOp::getLen(desc));
         DPRINTF(EthernetDesc, "TSO: pktHasHeader: %d\n", tsoPktHasHeader);
         DPRINTF(EthernetDesc, "TSO: Next packet is %d bytes\n", pkt_size);
         return pkt_size;
     }
 
     DPRINTF(EthernetDesc, "Next TX packet is %d bytes\n",
-            txd_op::getLen(unusedCache.front()));
-    return txd_op::getLen(desc);
+            TxdOp::getLen(unusedCache.front()));
+    return TxdOp::getLen(desc);
 }
 
 void
-IGbE::TxDescCache::getPacketData(EthPacketPtr p)
+IGbE_pcie::TxDescCache::getPacketData(EthPacketPtr p)
 {
     assert(unusedCache.size());
 
@@ -1669,8 +1806,8 @@ IGbE::TxDescCache::getPacketData(EthPacketPtr p)
 
     DPRINTF(EthernetDesc, "getPacketData(): TxDescriptor data "
             "d1: %#llx d2: %#llx\n", desc->d1, desc->d2);
-    assert((txd_op::isLegacy(desc) || txd_op::isData(desc)) &&
-           txd_op::getLen(desc));
+    assert((TxdOp::isLegacy(desc) || TxdOp::isData(desc)) &&
+           TxdOp::getLen(desc));
 
     pktPtr = p;
 
@@ -1684,7 +1821,7 @@ IGbE::TxDescCache::getPacketData(EthPacketPtr p)
             DPRINTF(EthernetDesc,
                     "Loading TSO header (%d bytes) into start of packet\n",
                     tsoHeaderLen);
-            memcpy(p->data, &tsoHeader, tsoHeaderLen);
+            memcpy(p->data, &tsoHeader,tsoHeaderLen);
             p->length +=tsoHeaderLen;
             tsoPktHasHeader = true;
         }
@@ -1694,33 +1831,35 @@ IGbE::TxDescCache::getPacketData(EthPacketPtr p)
         DPRINTF(EthernetDesc,
                 "Starting DMA of packet at offset %d length: %d\n",
                 p->length, tsoCopyBytes);
-        igbe->dmaRead(pciToDma(txd_op::getBuf(desc))
+        igbe->dmaRead(pciToDma(TxdOp::getBuf(desc))
                       + tsoDescBytesUsed,
                       tsoCopyBytes, &pktEvent, p->data + p->length,
                       igbe->txReadDelay);
         tsoDescBytesUsed += tsoCopyBytes;
-        assert(tsoDescBytesUsed <= txd_op::getLen(desc));
+        assert(tsoDescBytesUsed <= TxdOp::getLen(desc));
     } else {
-        igbe->dmaRead(pciToDma(txd_op::getBuf(desc)),
-                      txd_op::getLen(desc), &pktEvent, p->data + p->length,
+        igbe->dmaRead(pciToDma(TxdOp::getBuf(desc)),
+                      TxdOp::getLen(desc), &pktEvent, p->data + p->length,
                       igbe->txReadDelay);
     }
 }
 
 void
-IGbE::TxDescCache::pktComplete()
+IGbE_pcie::TxDescCache::pktComplete()
 {
 
     TxDesc *desc;
     assert(unusedCache.size());
     assert(pktPtr);
 
+    // igbe->anBegin("TXS", "Update Desc");
+
     DPRINTF(EthernetDesc, "DMA of packet complete\n");
 
 
     desc = unusedCache.front();
-    assert((txd_op::isLegacy(desc) || txd_op::isData(desc)) &&
-           txd_op::getLen(desc));
+    assert((TxdOp::isLegacy(desc) || TxdOp::isData(desc)) &&
+           TxdOp::getLen(desc));
 
     DPRINTF(EthernetDesc, "TxDescriptor data d1: %#llx d2: %#llx\n",
             desc->d1, desc->d2);
@@ -1736,17 +1875,19 @@ IGbE::TxDescCache::pktComplete()
         DPRINTF(EthernetDesc, "TSO: descBytesUsed: %d copyBytes: %d\n",
             tsoDescBytesUsed, tsoCopyBytes);
     } else {
-        pktPtr->simLength += txd_op::getLen(desc);
-        pktPtr->length += txd_op::getLen(desc);
+        pktPtr->simLength += TxdOp::getLen(desc);
+        pktPtr->length += TxdOp::getLen(desc);
     }
 
 
 
-    if ((!txd_op::eop(desc) && !useTso) ||
-        (pktPtr->length < (tsoMss + tsoHeaderLen) &&
+    if ((!TxdOp::eop(desc) && !useTso) ||
+        (pktPtr->length < ( tsoMss + tsoHeaderLen) &&
          tsoTotalLen != tsoUsedLen && useTso)) {
-        assert(!useTso || (tsoDescBytesUsed == txd_op::getLen(desc)));
+        assert(!useTso || (tsoDescBytesUsed == TxdOp::getLen(desc)));
+        // igbe->anDq("TXS", annUnusedCacheQ);
         unusedCache.pop_front();
+        // igbe->anQ("TXS", annUsedCacheQ);
         usedCache.push_back(desc);
 
         tsoDescBytesUsed = 0;
@@ -1766,43 +1907,41 @@ IGbE::TxDescCache::pktComplete()
 
     pktMultiDesc = false;
     // no support for vlans
-    assert(!txd_op::vle(desc));
+    assert(!TxdOp::vle(desc));
 
     // we only support single packet descriptors at this point
     if (!useTso)
-        assert(txd_op::eop(desc));
+        assert(TxdOp::eop(desc));
 
     // set that this packet is done
-    if (txd_op::rs(desc))
-        txd_op::setDd(desc);
+    if (TxdOp::rs(desc))
+        TxdOp::setDd(desc);
 
     DPRINTF(EthernetDesc, "TxDescriptor data d1: %#llx d2: %#llx\n",
             desc->d1, desc->d2);
 
     if (useTso) {
         IpPtr ip(pktPtr);
-        Ip6Ptr ip6(pktPtr);
         if (ip) {
             DPRINTF(EthernetDesc, "TSO: Modifying IP header. Id + %d\n",
                     tsoPkts);
             ip->id(ip->id() + tsoPkts++);
             ip->len(pktPtr->length - EthPtr(pktPtr)->size());
-        }
-        if (ip6)
-            ip6->plen(pktPtr->length - EthPtr(pktPtr)->size());
-        TcpPtr tcp = ip ? TcpPtr(ip) : TcpPtr(ip6);
-        if (tcp) {
-            DPRINTF(EthernetDesc,
-                    "TSO: Modifying TCP header. old seq %d + %d\n",
-                    tcp->seq(), tsoPrevSeq);
-            tcp->seq(tcp->seq() + tsoPrevSeq);
-            if (tsoUsedLen != tsoTotalLen)
-                tcp->flags(tcp->flags() & ~9); // clear fin & psh
-        }
-        UdpPtr udp = ip ? UdpPtr(ip) : UdpPtr(ip6);
-        if (udp) {
-            DPRINTF(EthernetDesc, "TSO: Modifying UDP header.\n");
-            udp->len(pktPtr->length - EthPtr(pktPtr)->size());
+
+            TcpPtr tcp(ip);
+            if (tcp) {
+                DPRINTF(EthernetDesc,
+                        "TSO: Modifying TCP header. old seq %d + %d\n",
+                        tcp->seq(), tsoPrevSeq);
+                tcp->seq(tcp->seq() + tsoPrevSeq);
+                if (tsoUsedLen != tsoTotalLen)
+                    tcp->flags(tcp->flags() & ~9); // clear fin & psh
+            }
+            UdpPtr udp(ip);
+            if (udp) {
+                DPRINTF(EthernetDesc, "TSO: Modifying UDP header.\n");
+                udp->len(pktPtr->length - EthPtr(pktPtr)->size());
+            }
         }
         tsoPrevSeq = tsoUsedLen;
     }
@@ -1817,20 +1956,19 @@ IGbE::TxDescCache::pktComplete()
     }
 
     // Checksums are only ofloaded for new descriptor types
-    if (txd_op::isData(desc) && (txd_op::ixsm(desc) || txd_op::txsm(desc))) {
+    if (TxdOp::isData(desc) && ( TxdOp::ixsm(desc) || TxdOp::txsm(desc)) ) {
         DPRINTF(EthernetDesc, "Calculating checksums for packet\n");
         IpPtr ip(pktPtr);
-        Ip6Ptr ip6(pktPtr);
-        assert(ip || ip6);
-        if (ip && txd_op::ixsm(desc)) {
+        assert(ip);
+        if (TxdOp::ixsm(desc)) {
             ip->sum(0);
             ip->sum(cksum(ip));
             igbe->etherDeviceStats.txIpChecksums++;
             DPRINTF(EthernetDesc, "Calculated IP checksum\n");
         }
-        if (txd_op::txsm(desc)) {
-            TcpPtr tcp = ip ? TcpPtr(ip) : TcpPtr(ip6);
-            UdpPtr udp = ip ? UdpPtr(ip) : UdpPtr(ip6);
+        if (TxdOp::txsm(desc)) {
+            TcpPtr tcp(ip);
+            UdpPtr udp(ip);
             if (tcp) {
                 tcp->sum(0);
                 tcp->sum(cksum(tcp));
@@ -1848,7 +1986,7 @@ IGbE::TxDescCache::pktComplete()
         }
     }
 
-    if (txd_op::ide(desc)) {
+    if (TxdOp::ide(desc)) {
         // Deal with the rx timer interrupts
         DPRINTF(EthernetDesc, "Descriptor had IDE set\n");
         if (igbe->regs.tidv.idv()) {
@@ -1867,9 +2005,11 @@ IGbE::TxDescCache::pktComplete()
     }
 
 
-    if (!useTso ||  txd_op::getLen(desc) == tsoDescBytesUsed) {
+    if (!useTso ||  TxdOp::getLen(desc) == tsoDescBytesUsed) {
         DPRINTF(EthernetDesc, "Descriptor Done\n");
+        // igbe->anDq("TXS", annUnusedCacheQ);
         unusedCache.pop_front();
+        // igbe->anQ("TXS", annUsedCacheQ);
         usedCache.push_back(desc);
         tsoDescBytesUsed = 0;
     }
@@ -1887,14 +2027,17 @@ IGbE::TxDescCache::pktComplete()
     tsoPktHasHeader = false;
 
     if (igbe->regs.txdctl.wthresh() == 0) {
+        // igbe->anBegin("TXS", "Desc Writeback");
         DPRINTF(EthernetDesc, "WTHRESH == 0, writing back descriptor\n");
         writeback(0);
     } else if (!igbe->regs.txdctl.gran() && igbe->regs.txdctl.wthresh() <=
                descInBlock(usedCache.size())) {
         DPRINTF(EthernetDesc, "used > WTHRESH, writing back descriptor\n");
+        // igbe->anBegin("TXS", "Desc Writeback");
         writeback((igbe->cacheBlockSize()-1)>>4);
     } else if (igbe->regs.txdctl.wthresh() <= usedCache.size()) {
         DPRINTF(EthernetDesc, "used > WTHRESH, writing back descriptor\n");
+        // igbe->anBegin("TXS", "Desc Writeback");
         writeback((igbe->cacheBlockSize()-1)>>4);
     }
 
@@ -1903,23 +2046,23 @@ IGbE::TxDescCache::pktComplete()
 }
 
 void
-IGbE::TxDescCache::actionAfterWb()
+IGbE_pcie::TxDescCache::actionAfterWb()
 {
     DPRINTF(EthernetDesc, "actionAfterWb() completionEnabled: %d\n",
             completionEnabled);
-    igbe->postInterrupt(igbreg::IT_TXDW);
+    igbe->postInterrupt(iGbReg_pcie::IT_TXDW);
     if (completionEnabled) {
         descEnd = igbe->regs.tdh();
         DPRINTF(EthernetDesc,
                 "Completion writing back value: %d to addr: %#x\n", descEnd,
                 completionAddress);
         igbe->dmaWrite(pciToDma(mbits(completionAddress, 63, 2)),
-                       sizeof(descEnd), &nullEvent, (uint8_t *)&descEnd, 0);
+                       sizeof(descEnd), &nullEvent, (uint8_t*)&descEnd, 0);
     }
 }
 
 void
-IGbE::TxDescCache::serialize(CheckpointOut &cp) const
+IGbE_pcie::TxDescCache::serialize(CheckpointOut &cp) const
 {
     DescCache<TxDesc>::serialize(cp);
 
@@ -1948,7 +2091,7 @@ IGbE::TxDescCache::serialize(CheckpointOut &cp) const
 }
 
 void
-IGbE::TxDescCache::unserialize(CheckpointIn &cp)
+IGbE_pcie::TxDescCache::unserialize(CheckpointIn &cp)
 {
     DescCache<TxDesc>::unserialize(cp);
 
@@ -1977,7 +2120,7 @@ IGbE::TxDescCache::unserialize(CheckpointIn &cp)
 }
 
 bool
-IGbE::TxDescCache::packetAvailable()
+IGbE_pcie::TxDescCache::packetAvailable()
 {
     if (pktDone) {
         pktDone = false;
@@ -1987,7 +2130,7 @@ IGbE::TxDescCache::packetAvailable()
 }
 
 void
-IGbE::TxDescCache::enableSm()
+IGbE_pcie::TxDescCache::enableSm()
 {
     if (igbe->drainState() != DrainState::Draining) {
         igbe->txTick = true;
@@ -1996,7 +2139,7 @@ IGbE::TxDescCache::enableSm()
 }
 
 bool
-IGbE::TxDescCache::hasOutstandingEvents()
+IGbE_pcie::TxDescCache::hasOutstandingEvents()
 {
     return pktEvent.scheduled() || wbEvent.scheduled() ||
         fetchEvent.scheduled();
@@ -2006,7 +2149,7 @@ IGbE::TxDescCache::hasOutstandingEvents()
 ///////////////////////////////////// IGbE /////////////////////////////////
 
 void
-IGbE::restartClock()
+IGbE_pcie::restartClock()
 {
     if (!tickEvent.scheduled() && (rxTick || txTick || txFifoTick) &&
         drainState() == DrainState::Running)
@@ -2014,7 +2157,7 @@ IGbE::restartClock()
 }
 
 DrainState
-IGbE::drain()
+IGbE_pcie::drain()
 {
     unsigned int count(0);
     if (rxDescCache.hasOutstandingEvents() ||
@@ -2037,7 +2180,7 @@ IGbE::drain()
 }
 
 void
-IGbE::drainResume()
+IGbE_pcie::drainResume()
 {
     Drainable::drainResume();
 
@@ -2050,7 +2193,7 @@ IGbE::drainResume()
 }
 
 void
-IGbE::checkDrain()
+IGbE_pcie::checkDrain()
 {
     if (drainState() != DrainState::Draining)
         return;
@@ -2066,7 +2209,7 @@ IGbE::checkDrain()
 }
 
 void
-IGbE::txStateMachine()
+IGbE_pcie::txStateMachine()
 {
     if (!regs.tctl.en()) {
         txTick = false;
@@ -2079,6 +2222,7 @@ IGbE::txStateMachine()
     // iteration we'll get the rest of the data
     if (txPacket && txDescCache.packetAvailable()
         && !txDescCache.packetMultiDesc() && txPacket->length) {
+        // anQ("TXS", "TX FIFO Q");
         DPRINTF(EthernetSM, "TXS: packet placed in TX FIFO\n");
 #ifndef NDEBUG
         bool success =
@@ -2087,6 +2231,7 @@ IGbE::txStateMachine()
         txFifoTick = true && drainState() != DrainState::Draining;
         assert(success);
         txPacket = NULL;
+        // anBegin("TXS", "Desc Writeback");
         txDescCache.writeback((cacheBlockSize()-1)>>4);
         return;
     }
@@ -2105,7 +2250,10 @@ IGbE::txStateMachine()
     if (!txDescCache.packetWaiting()) {
         if (txDescCache.descLeft() == 0) {
             postInterrupt(IT_TXQE);
+            // anBegin("TXS", "Desc Writeback");
             txDescCache.writeback(0);
+            // anBegin("TXS", "Desc Fetch");
+            // anWe("TXS", txDescCache.annUnusedCacheQ);
             txDescCache.fetchDescriptors();
             DPRINTF(EthernetSM, "TXS: No descriptors left in ring, forcing "
                     "writeback stopping ticking and posting TXQE\n");
@@ -2115,12 +2263,15 @@ IGbE::txStateMachine()
 
 
         if (!(txDescCache.descUnused())) {
+            // anBegin("TXS", "Desc Fetch");
             txDescCache.fetchDescriptors();
+            // anWe("TXS", txDescCache.annUnusedCacheQ);
             DPRINTF(EthernetSM, "TXS: No descriptors available in cache, "
                     "fetching and stopping ticking\n");
             txTick = false;
             return;
         }
+        // anPq("TXS", txDescCache.annUnusedCacheQ);
 
 
         txDescCache.processContextDesc();
@@ -2133,6 +2284,8 @@ IGbE::txStateMachine()
 
         unsigned size = txDescCache.getPacketSize(txPacket);
         if (size > 0 && txFifo.avail() > size) {
+            // anRq("TXS", "TX FIFO Q");
+            // anBegin("TXS", "DMA Packet");
             DPRINTF(EthernetSM, "TXS: Reserving %d bytes in FIFO and "
                     "beginning DMA of next packet\n", size);
             txFifo.reserve(size);
@@ -2141,8 +2294,10 @@ IGbE::txStateMachine()
             DPRINTF(EthernetSM, "TXS: getPacketSize returned: %d\n", size);
             DPRINTF(EthernetSM,
                     "TXS: No packets to get, writing back used descriptors\n");
+            // anBegin("TXS", "Desc Writeback");
             txDescCache.writeback(0);
         } else {
+            // anWf("TXS", "TX FIFO Q");
             DPRINTF(EthernetSM, "TXS: FIFO full, stopping ticking until space "
                     "available in FIFO\n");
             txTick = false;
@@ -2156,16 +2311,20 @@ IGbE::txStateMachine()
 }
 
 bool
-IGbE::ethRxPkt(EthPacketPtr pkt)
+IGbE_pcie::ethRxPkt(EthPacketPtr pkt)
 {
+
     etherDeviceStats.rxBytes += pkt->length;
     etherDeviceStats.rxPackets++;
 
     DPRINTF(Ethernet, "RxFIFO: Receiving pcakte from wire\n");
+    // anBegin("RXQ", "Wire Recv");
 
 
     if (!regs.rctl.en()) {
+      //  printf("Rctl is not enabled \n") ;
         DPRINTF(Ethernet, "RxFIFO: RX not enabled, dropping\n");
+        // anBegin("RXQ", "FIFO Drop", CPA::FL_BAD);
         return true;
     }
 
@@ -2178,17 +2337,33 @@ IGbE::ethRxPkt(EthPacketPtr pkt)
     }
 
     if (!rxFifo.push(pkt)) {
+        //printf("rx fifo is full\n") ;
         DPRINTF(Ethernet, "RxFIFO: Packet won't fit in fifo... dropped\n");
         postInterrupt(IT_RXO, true);
+        // anBegin("RXQ", "FIFO Drop", CPA::FL_BAD);
         return false;
     }
+
+    // if (CPA::available() && cpa->enabled()) {
+    //     assert(sys->numSystemsRunning <= 2);
+    //     System *other_sys;
+    //     if (sys->systemList[0] == sys)
+    //         other_sys = sys->systemList[1];
+    //     else
+    //         other_sys = sys->systemList[0];
+
+    //     cpa->hwDq(CPA::FL_NONE, sys, macAddr, "RXQ", "WireQ", 0, other_sys);
+    //     anQ("RXQ", "RX FIFO Q");
+    //     cpa->hwWe(CPA::FL_NONE, sys, macAddr, "RXQ", "WireQ", 0, other_sys);
+    // }
+      //printf("Receiving packets successfully\n") ;
 
     return true;
 }
 
 
 void
-IGbE::rxStateMachine()
+IGbE_pcie::rxStateMachine()
 {
     if (!regs.rctl.en()) {
         rxTick = false;
@@ -2203,19 +2378,31 @@ IGbE::rxStateMachine()
         int descLeft = rxDescCache.descLeft();
         DPRINTF(EthernetSM, "RXS: descLeft: %d rdmts: %d rdlen: %d\n",
                 descLeft, regs.rctl.rdmts(), regs.rdlen());
-
-        // rdmts 2->1/8, 1->1/4, 0->1/2
-        int ratio = (1ULL << (regs.rctl.rdmts() + 1));
-        if (descLeft * ratio <= regs.rdlen()) {
+        /*switch (regs.rctl.rdmts()) {
+          case 2: if (descLeft > .125 * regs.rdlen()) break;
+          case 1: if (descLeft > .250 * regs.rdlen()) break;
+          case 0: if (descLeft > .500 * regs.rdlen())  break;
             DPRINTF(Ethernet, "RXS: Interrupting (RXDMT) "
                     "because of descriptors left\n");
             postInterrupt(IT_RXDMT);
+            break;
+            }*/
+        // replace the above statement because of implicit-fall-through error
+        if (((regs.rctl.rdmts() == 2) && (descLeft > .125 * regs.rdlen())) ||
+            ((regs.rctl.rdmts() == 1) && (descLeft > .250 * regs.rdlen())) ||
+            ((regs.rctl.rdmts() == 0) && (descLeft > .500 * regs.rdlen()))) {
+          // do nothing
+        } else {
+          DPRINTF(Ethernet, "RXS: Interrupting (RXDMT) "
+                  "because of descriptors left\n");
+          postInterrupt(IT_RXDMT);
         }
 
         if (rxFifo.empty())
             rxDescCache.writeback(0);
 
         if (descLeft == 0) {
+            // anBegin("RXS", "Writeback Descriptors");
             rxDescCache.writeback(0);
             DPRINTF(EthernetSM, "RXS: No descriptors left in ring, forcing"
                     " writeback and stopping ticking\n");
@@ -2228,6 +2415,7 @@ IGbE::rxStateMachine()
         if (regs.rxdctl.wthresh() >= rxDescCache.descUsed()) {
             DPRINTF(EthernetSM,
                     "RXS: Writing back because WTHRESH >= descUsed\n");
+            // anBegin("RXS", "Writeback Descriptors");
             if (regs.rxdctl.wthresh() < (cacheBlockSize()>>4))
                 rxDescCache.writeback(regs.rxdctl.wthresh()-1);
             else
@@ -2239,11 +2427,14 @@ IGbE::rxStateMachine()
              regs.rxdctl.hthresh())) {
             DPRINTF(EthernetSM, "RXS: Fetching descriptors because "
                     "descUnused < PTHRESH\n");
+            // anBegin("RXS", "Fetch Descriptors");
             rxDescCache.fetchDescriptors();
         }
 
         if (rxDescCache.descUnused() == 0) {
+            // anBegin("RXS", "Fetch Descriptors");
             rxDescCache.fetchDescriptors();
+            // anWe("RXS", rxDescCache.annUnusedCacheQ);
             DPRINTF(EthernetSM, "RXS: No descriptors available in cache, "
                     "fetching descriptors and stopping ticking\n");
             rxTick = false;
@@ -2259,19 +2450,25 @@ IGbE::rxStateMachine()
     }
 
     if (!rxDescCache.descUnused()) {
+        // anBegin("RXS", "Fetch Descriptors");
         rxDescCache.fetchDescriptors();
+        // anWe("RXS", rxDescCache.annUnusedCacheQ);
         DPRINTF(EthernetSM, "RXS: No descriptors available in cache, "
                 "stopping ticking\n");
         rxTick = false;
         DPRINTF(EthernetSM, "RXS: No descriptors available, fetching\n");
         return;
     }
+    // anPq("RXS", rxDescCache.annUnusedCacheQ);
 
     if (rxFifo.empty()) {
+        // anWe("RXS", "RX FIFO Q");
         DPRINTF(EthernetSM, "RXS: RxFIFO empty, stopping ticking\n");
         rxTick = false;
         return;
     }
+    // anPq("RXS", "RX FIFO Q");
+    // anBegin("RXS", "Get Desc");
 
     EthPacketPtr pkt;
     pkt = rxFifo.front();
@@ -2280,26 +2477,33 @@ IGbE::rxStateMachine()
     pktOffset = rxDescCache.writePacket(pkt, pktOffset);
     DPRINTF(EthernetSM, "RXS: Writing packet into memory\n");
     if (pktOffset == pkt->length) {
+        // anBegin( "RXS", "FIFO Dequeue");
         DPRINTF(EthernetSM, "RXS: Removing packet from FIFO\n");
         pktOffset = 0;
+        // anDq("RXS", "RX FIFO Q");
         rxFifo.pop();
     }
 
     DPRINTF(EthernetSM, "RXS: stopping ticking until packet DMA completes\n");
     rxTick = false;
     rxDmaPacket = true;
+    // anBegin("RXS", "DMA Packet");
 }
 
 void
-IGbE::txWire()
+IGbE_pcie::txWire()
 {
     txFifoTick = false;
 
-    if (txFifo.empty())
+    if (txFifo.empty()) {
+        // anWe("TXQ", "TX FIFO Q");
         return;
+    }
 
 
+    // anPq("TXQ", "TX FIFO Q");
     if (etherInt->sendPacket(txFifo.front())) {
+        // anQ("TXQ", "WireQ");
         if (debug::EthernetSM) {
             IpPtr ip(txFifo.front());
             if (ip)
@@ -2308,6 +2512,8 @@ IGbE::txWire()
             else
                 DPRINTF(EthernetSM, "Transmitting Non-Ip packet\n");
         }
+        // anDq("TXQ", "TX FIFO Q");
+        // anBegin("TXQ", "Wire Send");
         DPRINTF(EthernetSM,
                 "TxFIFO: Successful transmit, bytes available in fifo: %d\n",
                 txFifo.avail());
@@ -2320,7 +2526,7 @@ IGbE::txWire()
 }
 
 void
-IGbE::tick()
+IGbE_pcie::tick()
 {
     DPRINTF(EthernetSM, "IGbE: -------------- Cycle --------------\n");
 
@@ -2348,8 +2554,9 @@ IGbE::tick()
 }
 
 void
-IGbE::ethTxDone()
+IGbE_pcie::ethTxDone()
 {
+    // anBegin("TXQ", "Send Done");
     // restart the tx state machines if they are stopped
     // fifo to send another packet
     // tx sm to put more data into the fifo
@@ -2363,7 +2570,7 @@ IGbE::ethTxDone()
 }
 
 void
-IGbE::serialize(CheckpointOut &cp) const
+IGbE_pcie::serialize(CheckpointOut &cp) const
 {
     PciDevice::serialize(cp);
 
@@ -2374,7 +2581,7 @@ IGbE::serialize(CheckpointOut &cp) const
     SERIALIZE_SCALAR(eeOpcode);
     SERIALIZE_SCALAR(eeAddr);
     SERIALIZE_SCALAR(lastInterrupt);
-    SERIALIZE_ARRAY(flash, igbreg::EEPROM_SIZE);
+    SERIALIZE_ARRAY(flash,iGbReg_pcie::EEPROM_SIZE);
 
     rxFifo.serialize("rxfifo", cp);
     txFifo.serialize("txfifo", cp);
@@ -2414,7 +2621,7 @@ IGbE::serialize(CheckpointOut &cp) const
 }
 
 void
-IGbE::unserialize(CheckpointIn &cp)
+IGbE_pcie::unserialize(CheckpointIn &cp)
 {
     PciDevice::unserialize(cp);
 
@@ -2425,7 +2632,7 @@ IGbE::unserialize(CheckpointIn &cp)
     UNSERIALIZE_SCALAR(eeOpcode);
     UNSERIALIZE_SCALAR(eeAddr);
     UNSERIALIZE_SCALAR(lastInterrupt);
-    UNSERIALIZE_ARRAY(flash, igbreg::EEPROM_SIZE);
+    UNSERIALIZE_ARRAY(flash,iGbReg_pcie::EEPROM_SIZE);
 
     rxFifo.unserialize("rxfifo", cp);
     txFifo.unserialize("txfifo", cp);
@@ -2469,4 +2676,4 @@ IGbE::unserialize(CheckpointIn &cp)
     rxDescCache.unserializeSection(cp, "RxDescCache");
 }
 
-} // namespace gem5
+}//gem5

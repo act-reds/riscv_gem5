@@ -1,48 +1,8 @@
-/*
- * Copyright (c) 2012 ARM Limited
- * All rights reserved
- *
- * The license below extends only to copyright in the software and shall
- * not be construed as granting a license to any other intellectual
- * property including but not limited to intellectual property relating
- * to a hardware implementation of the functionality of the software
- * licensed hereunder.  You may use the software subject to the license
- * terms below provided that you ensure that this notice is replicated
- * unmodified and in its entirety in all distributions of the software,
- * modified or unmodified, in source code or in binary form.
- *
- * Copyright (c) 2008 The Regents of The University of Michigan
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are
- * met: redistributions of source code must retain the above copyright
- * notice, this list of conditions and the following disclaimer;
- * redistributions in binary form must reproduce the above copyright
- * notice, this list of conditions and the following disclaimer in the
- * documentation and/or other materials provided with the distribution;
- * neither the name of the copyright holders nor the names of its
- * contributors may be used to endorse or promote products derived from
- * this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- */
-
 /* @file
- * Device model for Intel's I/O AT DMA copy engine.
+ * Non-Volatile Dual In-line Memory Module Virtualization Implementation
  */
 
-#include "dev/pci/copy_engine.hh"
+#include "dev/pci/CXL_mem.hh"
 
 #include <algorithm>
 
@@ -52,7 +12,7 @@
 #include "debug/Drain.hh"
 #include "mem/packet.hh"
 #include "mem/packet_access.hh"
-#include "params/CopyEngine.hh"
+#include "params/CXLMem.hh"
 #include "sim/stats.hh"
 #include "sim/system.hh"
 
@@ -61,26 +21,27 @@ namespace gem5
 
 using namespace copy_engine_reg;
 
-CopyEngine::CopyEngine(const Params &p)
+CXLMem::CXLMem(const Params &p)
     : PciDevice(p),
-      copyEngineStats(this, p.ChanCnt)
+      CXLMemStats(this, p.ChanCnt)
 {
     // All Reg regs are initialized to 0 by default
     regs.chanCount = p.ChanCnt;
     regs.xferCap = findMsbSet(p.XferCap);
     regs.attnStatus = 0;
 
+    warn("CXL initialization!!\n");
     if (regs.chanCount > 64)
-        fatal("CopyEngine interface doesn't support more than 64 DMA engines\n");
+        fatal("CXLMem interface doesn't support more than 64 DMA engines\n");
 
     for (int x = 0; x < regs.chanCount; x++) {
-        CopyEngineChannel *ch = new CopyEngineChannel(this, x);
+        CXLMemChannel *ch = new CXLMemChannel(this, x);
         chan.push_back(ch);
     }
 }
 
 
-CopyEngine::CopyEngineChannel::CopyEngineChannel(CopyEngine *_ce, int cid)
+CXLMem::CXLMemChannel::CXLMemChannel(CXLMem *_ce, int cid)
     : ce(_ce), channelId(cid), busy(false), underReset(false),
       refreshNext(false), latBeforeBegin(ce->params().latBeforeBegin),
       latAfterCompletion(ce->params().latAfterCompletion),
@@ -96,46 +57,45 @@ CopyEngine::CopyEngineChannel::CopyEngineChannel(CopyEngine *_ce, int cid)
         cr.descChainAddr = 0;
         cr.completionAddr = 0;
 
+
         curDmaDesc = new DmaDesc;
         memset(curDmaDesc, 0, sizeof(DmaDesc));
         copyBuffer = new uint8_t[ce->params().XferCap];
 }
 
-CopyEngine::~CopyEngine()
+CXLMem::~CXLMem()
 {
     for (int x = 0; x < chan.size(); x++) {
         delete chan[x];
     }
 }
 
-CopyEngine::CopyEngineChannel::~CopyEngineChannel()
+CXLMem::CXLMemChannel::~CXLMemChannel()
 {
     delete curDmaDesc;
     delete [] copyBuffer;
 }
 
 Port &
-CopyEngine::getPort(const std::string &if_name, PortID idx)
+CXLMem::getPort(const std::string &if_name, PortID idx)
 {
     if (if_name != "dma") {
         // pass it along to our super class
         return PciDevice::getPort(if_name, idx);
     } else {
         if (idx >= static_cast<int>(chan.size())) {
-            panic("CopyEngine::getPort: unknown index %d\n", idx);
+            panic("CXLMem::getPort: unknown index %d\n", idx);
         }
 
         return DmaDevice::getPort(if_name,idx);
     }
 }
 
-
-
-
 void
-CopyEngine::CopyEngineChannel::recvCommand()
+CXLMem::CXLMemChannel::recvCommand()
 {
     if (cr.command.start_dma()) {
+        DPRINTF(DMACopyEngine, "receive command:start_dma\n");
         assert(!busy);
         cr.status.dma_transfer_status(0);
         nextState = DescriptorFetch;
@@ -143,15 +103,22 @@ CopyEngine::CopyEngineChannel::recvCommand()
         if (ce->drainState() == DrainState::Running)
             fetchDescriptor(cr.descChainAddr);
     } else if (cr.command.append_dma()) {
+        DPRINTF(DMACopyEngine, "receive command:append_dma\n");
         if (!busy) {
             nextState = AddressFetch;
             if (ce->drainState() == DrainState::Running)
                 fetchNextAddr(lastDescriptorAddr);
         } else
+        {
+            DPRINTF(DMACopyEngine, "system busy, schedule to next state\n");
             refreshNext = true;
+        }
     } else if (cr.command.reset_dma()) {
-        if (busy)
+        DPRINTF(DMACopyEngine, "receive command:reset_dma\n");
+        if (busy){
+            DPRINTF(DMACopyEngine, "Warning: Reset Command Set during busy!!!\n");
             underReset = true;
+        }
         else {
             cr.status.dma_transfer_status(3);
             nextState = Idle;
@@ -163,11 +130,11 @@ CopyEngine::CopyEngineChannel::recvCommand()
 }
 
 Tick
-CopyEngine::read(PacketPtr pkt)
+CXLMem::read(PacketPtr pkt)
 {
     int bar;
     Addr daddr;
-
+    warn("CXLMem Read function called!!\n");
     if (!getBAR(pkt->getAddr(), bar, daddr))
         panic("Invalid PCI memory access to unmapped memory.\n");
 
@@ -236,7 +203,7 @@ CopyEngine::read(PacketPtr pkt)
 }
 
 void
-CopyEngine::CopyEngineChannel::channelRead(Packet *pkt, Addr daddr, int size)
+CXLMem::CXLMemChannel::channelRead(Packet *pkt, Addr daddr, int size)
 {
     switch (daddr) {
       case CHAN_CONTROL:
@@ -286,11 +253,12 @@ CopyEngine::CopyEngineChannel::channelRead(Packet *pkt, Addr daddr, int size)
 
 
 Tick
-CopyEngine::write(PacketPtr pkt)
+CXLMem::write(PacketPtr pkt)
 {
     int bar;
     Addr daddr;
 
+    warn("CXLMem::write start!!!\n");
 
     if (!getBAR(pkt->getAddr(), bar, daddr))
         panic("Invalid PCI memory access to unmapped memory.\n");
@@ -333,7 +301,8 @@ CopyEngine::write(PacketPtr pkt)
                     daddr);
             break;
           case GEN_INTRCTRL:
-            regs.intrctrl.master_int_enable(bits(pkt->getLE<uint8_t>(), 0, 1));
+            DPRINTF(DMACopyEngine, "regs.intrctrl.master_int_enable\n");
+            regs.intrctrl.master_int_enable(bits(pkt->getLE<uint8_t>(), 0, 0));
             break;
           default:
             panic("Read request to unknown register number: %#x\n", daddr);
@@ -364,7 +333,7 @@ CopyEngine::write(PacketPtr pkt)
 }
 
 void
-CopyEngine::CopyEngineChannel::channelWrite(Packet *pkt, Addr daddr, int size)
+CXLMem::CXLMemChannel::channelWrite(Packet *pkt, Addr daddr, int size)
 {
     switch (daddr) {
       case CHAN_CONTROL:
@@ -425,10 +394,10 @@ CopyEngine::CopyEngineChannel::channelWrite(Packet *pkt, Addr daddr, int size)
     }
 }
 
-CopyEngine::
-CopyEngineStats::CopyEngineStats(statistics::Group *parent,
+CXLMem::
+CXLMemStats::CXLMemStats(statistics::Group *parent,
                                  const uint8_t &channel_count)
-    : statistics::Group(parent, "CopyEngine"),
+    : statistics::Group(parent, "CXLMem"),
       ADD_STAT(bytesCopied, statistics::units::Byte::get(),
                "Number of bytes copied by each engine"),
       ADD_STAT(copiesProcessed, statistics::units::Count::get(),
@@ -445,7 +414,7 @@ CopyEngineStats::CopyEngineStats(statistics::Group *parent,
 }
 
 void
-CopyEngine::CopyEngineChannel::fetchDescriptor(Addr address)
+CXLMem::CXLMemChannel::fetchDescriptor(Addr address)
 {
     DPRINTF(DMACopyEngine, "Reading descriptor from at memory location %#x(%#x)\n",
            address, ce->pciToDma(address));
@@ -462,7 +431,7 @@ CopyEngine::CopyEngineChannel::fetchDescriptor(Addr address)
 }
 
 void
-CopyEngine::CopyEngineChannel::fetchDescComplete()
+CXLMem::CXLMemChannel::fetchDescComplete()
 {
     DPRINTF(DMACopyEngine, "Read of descriptor complete\n");
 
@@ -474,7 +443,12 @@ CopyEngine::CopyEngineChannel::fetchDescComplete()
             nextState = CompletionWrite;
             if (inDrain()) return;
             writeCompletionStatus();
-        } else {
+        } else if(refreshNext)
+        {
+            continueProcessing();
+            return;
+        }
+        else{
             busy = false;
             nextState = Idle;
             inDrain();
@@ -491,17 +465,17 @@ CopyEngine::CopyEngineChannel::fetchDescComplete()
 }
 
 void
-CopyEngine::CopyEngineChannel::readCopyBytes()
+CXLMem::CXLMemChannel::readCopyBytes()
 {
-    DPRINTF(DMACopyEngine, "Reading %d bytes from buffer to memory location %#x(%#x)\n",
-           curDmaDesc->len, curDmaDesc->dest,
+    DPRINTF(DMACopyEngine, "Reading %d bytes from memory location %#x(%#x) to buffer\n",
+           curDmaDesc->len, curDmaDesc->src,
            ce->pciToDma(curDmaDesc->src));
     ce->dmaPort.dmaAction(MemCmd::ReadReq, ce->pciToDma(curDmaDesc->src),
                      curDmaDesc->len, &readCompleteEvent, copyBuffer, 0);
 }
 
 void
-CopyEngine::CopyEngineChannel::readCopyBytesComplete()
+CXLMem::CXLMemChannel::readCopyBytesComplete()
 {
     DPRINTF(DMACopyEngine, "Read of bytes to copy complete\n");
 
@@ -511,7 +485,7 @@ CopyEngine::CopyEngineChannel::readCopyBytesComplete()
 }
 
 void
-CopyEngine::CopyEngineChannel::writeCopyBytes()
+CXLMem::CXLMemChannel::writeCopyBytes()
 {
     DPRINTF(DMACopyEngine, "Writing %d bytes from buffer to memory location %#x(%#x)\n",
            curDmaDesc->len, curDmaDesc->dest,
@@ -520,12 +494,12 @@ CopyEngine::CopyEngineChannel::writeCopyBytes()
     ce->dmaPort.dmaAction(MemCmd::WriteReq, ce->pciToDma(curDmaDesc->dest),
                      curDmaDesc->len, &writeCompleteEvent, copyBuffer, 0);
 
-    ce->copyEngineStats.bytesCopied[channelId] += curDmaDesc->len;
-    ce->copyEngineStats.copiesProcessed[channelId]++;
+    ce->CXLMemStats.bytesCopied[channelId] += curDmaDesc->len;
+    ce->CXLMemStats.copiesProcessed[channelId]++;
 }
 
 void
-CopyEngine::CopyEngineChannel::writeCopyBytesComplete()
+CXLMem::CXLMemChannel::writeCopyBytesComplete()
 {
     DPRINTF(DMACopyEngine, "Write of bytes to copy complete user1: %#x\n",
             curDmaDesc->user1);
@@ -544,10 +518,10 @@ CopyEngine::CopyEngineChannel::writeCopyBytesComplete()
 }
 
 void
-CopyEngine::CopyEngineChannel::continueProcessing()
+CXLMem::CXLMemChannel::continueProcessing()
 {
     busy = false;
-
+     DPRINTF(DMACopyEngine, "CXLMemChannel continueProcessing\n");
     if (underReset) {
         underReset = false;
         refreshNext = false;
@@ -573,7 +547,7 @@ CopyEngine::CopyEngineChannel::continueProcessing()
 }
 
 void
-CopyEngine::CopyEngineChannel::writeCompletionStatus()
+CXLMem::CXLMemChannel::writeCompletionStatus()
 {
     DPRINTF(DMACopyEngine, "Writing completion status %#x to address %#x(%#x)\n",
             completionDataReg, cr.completionAddr,
@@ -586,14 +560,14 @@ CopyEngine::CopyEngineChannel::writeCompletionStatus()
 }
 
 void
-CopyEngine::CopyEngineChannel::writeStatusComplete()
+CXLMem::CXLMemChannel::writeStatusComplete()
 {
     DPRINTF(DMACopyEngine, "Writing completion status complete\n");
     continueProcessing();
 }
 
 void
-CopyEngine::CopyEngineChannel::fetchNextAddr(Addr address)
+CXLMem::CXLMemChannel::fetchNextAddr(Addr address)
 {
     DPRINTF(DMACopyEngine, "Fetching next address...\n");
     busy = true;
@@ -604,7 +578,7 @@ CopyEngine::CopyEngineChannel::fetchNextAddr(Addr address)
 }
 
 void
-CopyEngine::CopyEngineChannel::fetchAddrComplete()
+CXLMem::CXLMemChannel::fetchAddrComplete()
 {
     DPRINTF(DMACopyEngine, "Fetching next address complete: %#x\n",
             curDmaDesc->next);
@@ -622,10 +596,10 @@ CopyEngine::CopyEngineChannel::fetchAddrComplete()
 }
 
 bool
-CopyEngine::CopyEngineChannel::inDrain()
+CXLMem::CXLMemChannel::inDrain()
 {
     if (drainState() == DrainState::Draining) {
-        DPRINTF(Drain, "CopyEngine done draining, processing drain event\n");
+        DPRINTF(Drain, "CXLMem done draining, processing drain event\n");
         signalDrainDone();
     }
 
@@ -633,18 +607,18 @@ CopyEngine::CopyEngineChannel::inDrain()
 }
 
 DrainState
-CopyEngine::CopyEngineChannel::drain()
+CXLMem::CXLMemChannel::drain()
 {
     if (nextState == Idle || ce->drainState() != DrainState::Running) {
         return DrainState::Drained;
     } else {
-        DPRINTF(Drain, "CopyEngineChannel not drained\n");
+        DPRINTF(Drain, "CXLMemChannel not drained\n");
         return DrainState::Draining;
     }
 }
 
 void
-CopyEngine::serialize(CheckpointOut &cp) const
+CXLMem::serialize(CheckpointOut &cp) const
 {
     PciDevice::serialize(cp);
     regs.serialize(cp);
@@ -653,7 +627,7 @@ CopyEngine::serialize(CheckpointOut &cp) const
 }
 
 void
-CopyEngine::unserialize(CheckpointIn &cp)
+CXLMem::unserialize(CheckpointIn &cp)
 {
     PciDevice::unserialize(cp);
     regs.unserialize(cp);
@@ -662,7 +636,7 @@ CopyEngine::unserialize(CheckpointIn &cp)
 }
 
 void
-CopyEngine::CopyEngineChannel::serialize(CheckpointOut &cp) const
+CXLMem::CXLMemChannel::serialize(CheckpointOut &cp) const
 {
     SERIALIZE_SCALAR(channelId);
     SERIALIZE_SCALAR(busy);
@@ -679,7 +653,7 @@ CopyEngine::CopyEngineChannel::serialize(CheckpointOut &cp) const
 
 }
 void
-CopyEngine::CopyEngineChannel::unserialize(CheckpointIn &cp)
+CXLMem::CXLMemChannel::unserialize(CheckpointIn &cp)
 {
     UNSERIALIZE_SCALAR(channelId);
     UNSERIALIZE_SCALAR(busy);
@@ -698,7 +672,7 @@ CopyEngine::CopyEngineChannel::unserialize(CheckpointIn &cp)
 }
 
 void
-CopyEngine::CopyEngineChannel::restartStateMachine()
+CXLMem::CXLMemChannel::restartStateMachine()
 {
     switch(nextState) {
       case AddressFetch:
@@ -719,12 +693,12 @@ CopyEngine::CopyEngineChannel::restartStateMachine()
       case Idle:
         break;
       default:
-        panic("Unknown state for CopyEngineChannel\n");
+        panic("Unknown state for CXLMemChannel\n");
     }
 }
 
 void
-CopyEngine::CopyEngineChannel::drainResume()
+CXLMem::CXLMemChannel::drainResume()
 {
     DPRINTF(DMACopyEngine, "Restarting state machine at state %d\n", nextState);
     restartStateMachine();

@@ -63,7 +63,7 @@ namespace gem5
 
 PciDevice::PciDevice(const PciDeviceParams &p)
     : DmaDevice(p),
-      _busAddr(p.pci_bus, p.pci_dev, p.pci_func),
+      _busAddr(p.pci_bus, p.pci_dev, p.pci_func, p.root_port_number),
       PMCAP_BASE(p.PMCAPBaseOffset),
       PMCAP_ID_OFFSET(p.PMCAPBaseOffset+PMCAP_ID),
       PMCAP_PC_OFFSET(p.PMCAPBaseOffset+PMCAP_PC),
@@ -81,6 +81,7 @@ PciDevice::PciDevice(const PciDeviceParams &p)
       pioDelay(p.pio_latency),
       configDelay(p.config_latency)
 {
+    is_invisible = p.is_invisible;
     fatal_if(p.InterruptPin >= 5,
              "Invalid PCI interrupt '%i' specified.", p.InterruptPin);
 
@@ -211,10 +212,32 @@ PciDevice::PciDevice(const PciDeviceParams &p)
 Tick
 PciDevice::readConfig(PacketPtr pkt)
 {
+    if (is_invisible) {
+        uint8_t *pkt_data(pkt->getPtr<uint8_t>());
+              std::fill(pkt_data, pkt_data + pkt->getSize(), 0xFF);
+              // default to all 1's for unregistered PCI devices
+        pkt->makeAtomicResponse();
+        return 0;
+    }
     int offset = pkt->getAddr() & PCI_CONFIG_SIZE;
+    uint8_t allZero = 0;
+    uint8_t * dataAddr = &allZero;
 
+    if (offset < PCI_DEVICE_SPECIFIC) {
+      dataAddr = &config.data[offset];
+    /* Check if the access refers to a capability structure */
+    } else if (offset >= PMCAP_BASE && offset < (PMCAP_BASE + PMCAP_SIZE)) {
+      dataAddr = &pmcap.data[offset - PMCAP_BASE];
+    } else if (offset >= MSICAP_BASE && offset < (MSICAP_BASE + MSICAP_SIZE)) {
+      dataAddr = &msicap.data[offset - MSICAP_BASE];
+    } else if (offset >= MSIXCAP_BASE
+              && offset < (MSIXCAP_BASE + MSIXCAP_SIZE))
+    {
+      dataAddr = &msixcap.data[offset - MSIXCAP_BASE];
+    } else if (offset >= PXCAP_BASE && offset < (PXCAP_BASE + PXCAP_SIZE)) {
+      dataAddr = &pxcap.data[offset - PXCAP_BASE];
     /* Return 0 for accesses to unimplemented PCI configspace areas */
-    if (offset >= PCI_DEVICE_SPECIFIC &&
+    } else if (offset >= PCI_DEVICE_SPECIFIC &&
         offset < PCI_CONFIG_SIZE) {
         warn_once("Device specific PCI config space "
                   "not implemented for %s!\n", this->name());
@@ -235,23 +258,50 @@ PciDevice::readConfig(PacketPtr pkt)
         panic("Out-of-range access to PCI config space!\n");
     }
 
+    // switch (pkt->getSize()) {
+    //   case sizeof(uint8_t):
+    //     pkt->setLE<uint8_t>(config.data[offset]);
+    //     DPRINTF(PciDevice,
+    //         "readConfig:  dev %#x func %#x reg %#x 1 bytes: data = %#x\n",
+    //         _busAddr.dev, _busAddr.func, offset,
+    //         (uint32_t)pkt->getLE<uint8_t>());
+    //     break;
+    //   case sizeof(uint16_t):
+    //     pkt->setLE<uint16_t>(*(uint16_t*)&config.data[offset]);
+    //     DPRINTF(PciDevice,
+    //         "readConfig:  dev %#x func %#x reg %#x 2 bytes: data = %#x\n",
+    //         _busAddr.dev, _busAddr.func, offset,
+    //         (uint32_t)pkt->getLE<uint16_t>());
+    //     break;
+    //   case sizeof(uint32_t):
+    //     pkt->setLE<uint32_t>(*(uint32_t*)&config.data[offset]);
+    //     DPRINTF(PciDevice,
+    //         "readConfig:  dev %#x func %#x reg %#x 4 bytes: data = %#x\n",
+    //         _busAddr.dev, _busAddr.func, offset,
+    //         (uint32_t)pkt->getLE<uint32_t>());
+    //     break;
+    //   default:
+    //     panic("invalid access size(?) for PCI configspace!\n");
+    // }
+    // pkt->makeAtomicResponse();
+    // return configDelay;
     switch (pkt->getSize()) {
       case sizeof(uint8_t):
-        pkt->setLE<uint8_t>(config.data[offset]);
+        pkt->setLE<uint8_t>(*dataAddr);
         DPRINTF(PciDevice,
             "readConfig:  dev %#x func %#x reg %#x 1 bytes: data = %#x\n",
             _busAddr.dev, _busAddr.func, offset,
             (uint32_t)pkt->getLE<uint8_t>());
         break;
       case sizeof(uint16_t):
-        pkt->setLE<uint16_t>(*(uint16_t*)&config.data[offset]);
+        pkt->setLE<uint16_t>(*(uint16_t*)&(*dataAddr));
         DPRINTF(PciDevice,
             "readConfig:  dev %#x func %#x reg %#x 2 bytes: data = %#x\n",
             _busAddr.dev, _busAddr.func, offset,
             (uint32_t)pkt->getLE<uint16_t>());
         break;
       case sizeof(uint32_t):
-        pkt->setLE<uint32_t>(*(uint32_t*)&config.data[offset]);
+        pkt->setLE<uint32_t>(*(uint32_t*)&(*dataAddr));
         DPRINTF(PciDevice,
             "readConfig:  dev %#x func %#x reg %#x 4 bytes: data = %#x\n",
             _busAddr.dev, _busAddr.func, offset,
@@ -262,7 +312,6 @@ PciDevice::readConfig(PacketPtr pkt)
     }
     pkt->makeAtomicResponse();
     return configDelay;
-
 }
 
 AddrRangeList
@@ -284,8 +333,13 @@ PciDevice::writeConfig(PacketPtr pkt)
 {
     int offset = pkt->getAddr() & PCI_CONFIG_SIZE;
 
+    if ((offset >= PMCAP_BASE && offset < (PMCAP_BASE + PMCAP_SIZE)) ||
+    (offset >= MSICAP_BASE && offset < (MSICAP_BASE + MSICAP_SIZE)) ||
+    (offset >= MSIXCAP_BASE && offset < (MSIXCAP_BASE + MSIXCAP_SIZE)) ||
+    (offset >= PXCAP_BASE && offset < (PXCAP_BASE + PXCAP_SIZE))) {
+    // do nothing
     /* No effect if we write to config space that is not implemented*/
-    if (offset >= PCI_DEVICE_SPECIFIC &&
+    } else if (offset >= PCI_DEVICE_SPECIFIC &&
         offset < PCI_CONFIG_SIZE) {
         warn_once("Device specific PCI config space "
                   "not implemented for %s!\n", this->name());
@@ -303,6 +357,10 @@ PciDevice::writeConfig(PacketPtr pkt)
 
     switch (pkt->getSize()) {
       case sizeof(uint8_t):
+        DPRINTF(PciDevice,
+        "writeConfig: dev %#x func %#x reg %#x 1 bytes: data = %#x\n",
+        _busAddr.dev, _busAddr.func, offset,
+        (uint32_t)pkt->getLE<uint8_t>());
         switch (offset) {
           case PCI0_INTERRUPT_LINE:
             config.interruptLine = pkt->getLE<uint8_t>();
@@ -323,26 +381,47 @@ PciDevice::writeConfig(PacketPtr pkt)
           default:
             panic("writing to a read only register");
         }
-        DPRINTF(PciDevice,
-            "writeConfig: dev %#x func %#x reg %#x 1 bytes: data = %#x\n",
-            _busAddr.dev, _busAddr.func, offset,
-            (uint32_t)pkt->getLE<uint8_t>());
+        // DPRINTF(PciDevice,
+        //     "writeConfig: dev %#x func %#x reg %#x 1 bytes: data = %#x\n",
+        //     _busAddr.dev, _busAddr.func, offset,
+        //     (uint32_t)pkt->getLE<uint8_t>());
         break;
       case sizeof(uint16_t):
+        DPRINTF(PciDevice,
+        "writeConfig: dev %#x func %#x reg %#x 2 bytes: data = %#x\n",
+        _busAddr.dev, _busAddr.func, offset,
+        (uint32_t)pkt->getLE<uint16_t>());
         switch (offset) {
           case PCI_COMMAND:
-            config.command = pkt->getLE<uint8_t>();
+            config.command = pkt->getLE<uint16_t>(); // used to be uint8_t...
             // IO or memory space may have been enabled/disabled.
             pioPort.sendRangeChange();
             break;
           case PCI_STATUS:
-            config.status = pkt->getLE<uint8_t>();
+            config.status = pkt->getLE<uint16_t>();
+            // used to be uint8_t...
             break;
           case PCI_CACHE_LINE_SIZE:
-            config.cacheLineSize = pkt->getLE<uint8_t>();
+            config.cacheLineSize = pkt->getLE<uint16_t>();
+            // used to be uint8_t...
             break;
           default:
-            panic("writing to a read only register");
+            // panic("writing to a read only register");
+          /* Using if statements because capability regs.
+          bases are not constant vals */
+            if (offset == PMCAP_BASE + PMCAP_PMCS) {
+              pmcap.pmcs = pkt->getLE<uint16_t>();
+            } else if (offset == MSICAP_BASE + MSICAP_MC) {
+                  msicap.mc = pkt->getLE<uint16_t>();
+            } else if (offset == MSICAP_BASE + MSICAP_MD) {
+                  msicap.md = pkt->getLE<uint16_t>();
+            } else if (offset == MSIXCAP_BASE + MSIXCAP_MXC) {
+                  msixcap.mxc = pkt->getLE<uint16_t>();
+            } else if (offset == PXCAP_BASE + PXCAP_PXDC) {
+                  pxcap.pxdc = pkt->getLE<uint16_t>();
+            } else {
+              panic("writing to a read only register");
+            }
         }
         DPRINTF(PciDevice,
             "writeConfig: dev %#x func %#x reg %#x 2 bytes: data = %#x\n",
@@ -350,6 +429,10 @@ PciDevice::writeConfig(PacketPtr pkt)
             (uint32_t)pkt->getLE<uint16_t>());
         break;
       case sizeof(uint32_t):
+                DPRINTF(PciDevice,
+          "writeConfig: dev %#x func %#x reg %#x 4 bytes: data = %#x\n",
+          _busAddr.dev, _busAddr.func, offset,
+          (uint32_t)pkt->getLE<uint32_t>());
         switch (offset) {
           case PCI0_BASE_ADDR0:
           case PCI0_BASE_ADDR1:
@@ -383,12 +466,29 @@ PciDevice::writeConfig(PacketPtr pkt)
             break;
 
           default:
-            DPRINTF(PciDevice, "Writing to a read only register");
+            // DPRINTF(PciDevice, "Writing to a read only register");
+          /* Using if statements because capability regs.
+          bases are not constant vals */
+          if (offset == MSICAP_BASE + MSICAP_MA) {
+                msicap.ma = pkt->getLE<uint32_t>();
+          } else if (offset == MSICAP_BASE + MSICAP_MUA) {
+                msicap.mua = pkt->getLE<uint32_t>();
+          } else if (offset == MSICAP_BASE + MSICAP_MMASK) {
+                msicap.mmask = pkt->getLE<uint32_t>();
+          } else if (offset == MSICAP_BASE + MSICAP_MPEND) {
+                msicap.mpend = pkt->getLE<uint32_t>();
+          } else if (offset == MSIXCAP_BASE + MSIXCAP_MTAB) {
+                msixcap.mtab = pkt->getLE<uint32_t>();
+          } else if (offset == MSIXCAP_BASE + MSIXCAP_MPBA) {
+                msixcap.mpba = pkt->getLE<uint32_t>();
+          } else {
+            panic("Writing to a read only register");
+          }
         }
-        DPRINTF(PciDevice,
-            "writeConfig: dev %#x func %#x reg %#x 4 bytes: data = %#x\n",
-            _busAddr.dev, _busAddr.func, offset,
-            (uint32_t)pkt->getLE<uint32_t>());
+        // DPRINTF(PciDevice,
+        //     "writeConfig: dev %#x func %#x reg %#x 4 bytes: data = %#x\n",
+        //     _busAddr.dev, _busAddr.func, offset,
+        //     (uint32_t)pkt->getLE<uint32_t>());
         break;
       default:
         panic("invalid access size(?) for PCI configspace!\n");

@@ -36,6 +36,7 @@
 namespace gem5
 {
 
+GEM5_DEPRECATED_NAMESPACE(CopyEngineReg, copy_engine_reg);
 namespace copy_engine_reg
 {
 
@@ -73,8 +74,8 @@ struct DmaDesc
     Addr src;
     Addr dest;
     Addr next;
-    uint64_t reserved1;
-    uint64_t reserved2;
+    uint64_t forward;
+    uint64_t readdone;
     uint64_t user1;
     uint64_t user2;
 };
@@ -186,6 +187,8 @@ struct ChanRegs : public Serializable
         ADD_FIELD8(abort_dma,3,1);
         ADD_FIELD8(resume_dma,4,1);
         ADD_FIELD8(reset_dma,5,1);
+        ADD_FIELD8(load_data,6,1);
+        ADD_FIELD8(store_data,7,1);
     };
     CHANCMD command;
 
