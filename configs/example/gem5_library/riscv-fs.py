@@ -224,23 +224,13 @@ if args.enable_gdb:
 
 # Set the Full System workload.
 board.set_kernel_disk_workload(
-    # kernel=BinaryResource(local_path="/home/act-reds/.cache/gem5/riscv-bootloader-vmlinux-5.10"),
     kernel=BinaryResource(
-        local_path="/home/act-reds/projects/midgard/resources/rootfs/riscv/output/images/bbl"
+        local_path="../../../../output/images/bbl"
     ),
-    # kernel=BinaryResource(local_path="/home/act-reds/projects/midgard/gem5_src/riscv_gem5/riscv64-sample/riscv-pk/build/riscv-bootloader-vmlinux-5.10"),
-    # disk_image=obtain_resource("/home/act-reds/projects/midgard/gem5_src/riscv_gem5/riscv64-sample/riscv-bootloader-vmlinux-5.10"),
     disk_image=DiskImageResource(
-        local_path="/home/act-reds/projects/midgard/gem5_src/riscv_gem5/riscv_disk_custom"
+        local_path="../../../../rootfs.ext2"
     )
-    # disk_image=DiskImageResource(local_path="/home/act-reds/.cache/gem5/riscv-disk-img")
 )
-
-# # Set the Full System workload.
-# board.set_kernel_disk_workload(
-#     kernel=obtain_resource("riscv-bootloader-vmlinux-5.10"),
-#     disk_image=obtain_resource("riscv-disk-img"),
-# )
 
 simulator = Simulator(board=board)
 
