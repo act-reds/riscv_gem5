@@ -178,9 +178,9 @@ class RiscvBoard(AbstractSystemBoard, KernelDiskWorkload):
             ]
 
         # PCI
-        self.bridge.ranges.append(AddrRange(0x2F000000, size="16MB"))
+        # self.bridge.ranges.append(AddrRange(0x2F000000, size="16MB"))
         self.bridge.ranges.append(AddrRange(0x30000000, size="256MB"))
-        self.bridge.ranges.append(AddrRange(0x40000000, size="512MB"))
+        # self.bridge.ranges.append(AddrRange(0x40000000, size="512MB"))
 
         # # Root complex
         # switch_up_lanes = 4

@@ -224,12 +224,8 @@ if args.enable_gdb:
 
 # Set the Full System workload.
 board.set_kernel_disk_workload(
-    kernel=BinaryResource(
-        local_path="../../../../output/images/bbl"
-    ),
-    disk_image=DiskImageResource(
-        local_path="../../../../rootfs.ext2"
-    )
+    kernel=BinaryResource(local_path="../output/images/bbl"),
+    disk_image=DiskImageResource(local_path="../output/images/rootfs.ext2"),
 )
 
 simulator = Simulator(board=board)
