@@ -224,15 +224,21 @@ if args.enable_gdb:
 
 # Set the Full System workload.
 board.set_kernel_disk_workload(
-    kernel=BinaryResource(local_path="../output/images/bbl"),
-    disk_image=DiskImageResource(local_path="../output/images/rootfs.ext2"),
+    kernel=BinaryResource(
+        local_path="../output/images/bbl"
+    ),
+    disk_image=DiskImageResource(
+        local_path="../output/images/rootfs.ext2"
+    )
 )
 
 simulator = Simulator(board=board)
 
 print("Beginning simulation!")
+
 # Note: This simulation will never stop. You can access the terminal upon boot
 # using m5term (`./util/term`): `./m5term localhost <port>`. Note the `<port>`
 # value is obtained from the gem5 terminal stdout. Look out for
 # "system.platform.terminal: Listening for connections on port <port>".
 simulator.run()
+
