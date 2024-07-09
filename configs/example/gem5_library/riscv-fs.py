@@ -57,6 +57,7 @@ from m5.objects import (
     IGbE_pcie,
     IOXBar,
     PCIELink,
+    CXLMem,
     PMAChecker,
     Port,
     RawDiskImage,
@@ -92,6 +93,15 @@ parser.add_argument(
     "--enable-gdb", action="store_true", help="Enable the special feature"
 )
 
+parser.add_argument(
+    "--enable-pcie", action="store_true", help="Enable the special feature"
+)
+
+parser.add_argument(
+    "--enable-pci", action="store_true", help="Enable the special feature"
+)
+
+
 args = parser.parse_args()
 
 # Run a check to ensure the right version of gem5 is being used.
@@ -122,99 +132,145 @@ board = RiscvBoard(
     cache_hierarchy=cache_hierarchy,
 )
 
-# Root complex
-switch_up_lanes = 4
-lanes = 4  # 1
-cacheline_size = 64
-replay_buffer_size = 64
-should_print = False
-switch_buffer_size = 64
-pcie_switch_delay = "50ns"
+if args.enable_pcie:
+    # Root complex
+    switch_up_lanes = 4
+    lanes = 4  # 1
+    cacheline_size = 64
+    replay_buffer_size = 64
+    should_print = False
+    switch_buffer_size = 64
+    pcie_switch_delay = "50ns"
 
-# Declare PCIe links to connect the root complex
-board.pcie_switch = PCIELink(
-    lanes=switch_up_lanes,
-    speed="32Gbps",
-    mps=cacheline_size,
-    max_queue_size=replay_buffer_size,
-    debug_flag=False,
-)
-board.pcie_0 = PCIELink(
-    lanes=lanes,
-    speed="32Gbps",
-    mps=cacheline_size,
-    max_queue_size=replay_buffer_size,
-    debug_flag=False,
-)
-board.pcie_1 = PCIELink(
-    lanes=lanes,
-    speed="32Gbps",
-    mps=cacheline_size,
-    max_queue_size=replay_buffer_size,
-    debug_flag=False,
-)
+    # Declare PCIe links to connect the root complex
+    board.pcie_switch = PCIELink(
+        lanes=switch_up_lanes,
+        speed="32Gbps",
+        mps=cacheline_size,
+        max_queue_size=replay_buffer_size,
+        debug_flag=False,
+    )
+    board.pcie_0 = PCIELink(
+        lanes=lanes,
+        speed="32Gbps",
+        mps=cacheline_size,
+        max_queue_size=replay_buffer_size,
+        debug_flag=False,
+    )
+    board.pcie_1 = PCIELink(
+        lanes=lanes,
+        speed="32Gbps",
+        mps=cacheline_size,
+        max_queue_size=replay_buffer_size,
+        debug_flag=False,
+    )
 
-board.Root_Complex = CXL_Root_Complex(
-    is_transmit=False,
-    req_size=64,
-    resp_size=64,
-    delay="150ns",
-)
+    board.Root_Complex = CXL_Root_Complex(
+        is_transmit=False,
+        req_size=64,
+        resp_size=64,
+        delay="150ns",
+    )
 
-board.Root_Complex.offset_dvsec_rp = 0x100
-board.Root_Complex.offset_dvsec_up = 0x100
-board.Root_Complex.offset_dvsec_dp = 0x100
-board.Root_Complex.slave = board.get_cache_hierarchy().get_mem_side_port()
-# board.Root_Complex.slave = board.iobus.mem_side_ports
-# board.Root_Complex.slave = board.bridge.mem_side_port
-board.Root_Complex.slave_dma1 = board.pcie_switch.upstreamMaster
-board.Root_Complex.slave_dma2 = board.pcie_0.upstreamMaster
-board.Root_Complex.slave_dma3 = board.pcie_1.upstreamMaster
-board.Root_Complex.master_dma = board.iobus.cpu_side_ports
-board.Root_Complex.master1 = board.pcie_switch.upstreamSlave
-board.Root_Complex.master2 = board.pcie_0.upstreamSlave
-board.Root_Complex.master3 = board.pcie_1.upstreamSlave
-board.Root_Complex.host = board.platform.pci_host
+    board.Root_Complex.offset_dvsec_rp = 0x100
+    board.Root_Complex.offset_dvsec_up = 0x100
+    board.Root_Complex.offset_dvsec_dp = 0x100
+    # board.Root_Complex.slave = board.get_cache_hierarchy().get_mem_side_port()
+    board.Root_Complex.slave = board.iobus.mem_side_ports
+    # board.Root_Complex.slave = board.bridge.mem_side_port
+    board.Root_Complex.slave_dma1 = board.pcie_switch.upstreamMaster
+    board.Root_Complex.slave_dma2 = board.pcie_0.upstreamMaster
+    board.Root_Complex.slave_dma3 = board.pcie_1.upstreamMaster
+    board.Root_Complex.master_dma = board.iobus.cpu_side_ports
+    board.Root_Complex.master1 = board.pcie_switch.upstreamSlave
+    board.Root_Complex.master2 = board.pcie_0.upstreamSlave
+    board.Root_Complex.master3 = board.pcie_1.upstreamSlave
+    board.Root_Complex.host = board.platform.pci_host
 
+    board.ethernet5 = IGbE_e1000(
+        pci_bus=6,
+        pci_dev=0,
+        pci_func=0,
+        InterruptLine=0x1E,
+        InterruptPin=4,
+        root_port_number=1,
+        is_invisible=0,
+    )
+    board.ethernet5.pio = board.pcie_0.downstreamMaster
+    board.ethernet5.dma = board.pcie_0.downstreamSlave
+    board.ethernet5.host = board.platform.pci_host
 
-board.ethernet5 = IGbE_e1000(
-    pci_bus=6,
-    pci_dev=0,
-    pci_func=0,
-    InterruptLine=0x1E,
-    InterruptPin=4,
-    root_port_number=1,
-    is_invisible=0,
-)
-board.ethernet5.pio = board.pcie_0.downstreamMaster
-board.ethernet5.dma = board.pcie_0.downstreamSlave
-board.ethernet5.host = board.platform.pci_host
+    board.ide = IdeController(
+        pci_bus=7,
+        pci_dev=0,
+        pci_func=0,
+        InterruptLine=0x2,
+        InterruptPin=1,
+        root_port_number=2,
+        is_invisible=0,
+    )
+    board.ide.pio = board.pcie_1.downstreamMaster
+    board.ide.dma = board.pcie_1.downstreamSlave
+    board.ide.host = board.platform.pci_host
+    board.ide.sid = 1
 
-board.ethernet6 = IGbE_e1000(
-    pci_bus=7,
-    pci_dev=0,
-    pci_func=0,
-    InterruptLine=0x1E,
-    InterruptPin=4,
-    root_port_number=1,
-    is_invisible=0,
-)
-board.ethernet6.pio = board.pcie_1.downstreamMaster
-board.ethernet6.dma = board.pcie_1.downstreamSlave
-board.ethernet6.host = board.platform.pci_host
+    board.ethernet7 = IGbE_e1000(
+        pci_bus=5,
+        pci_dev=0,
+        pci_func=0,
+        InterruptLine=0x1E,
+        InterruptPin=4,
+        root_port_number=1,
+        is_invisible=0,
+    )
+    board.ethernet7.pio = board.pcie_switch.downstreamMaster
+    board.ethernet7.dma = board.pcie_switch.downstreamSlave
+    board.ethernet7.host = board.platform.pci_host
 
-board.ethernet7 = IGbE_e1000(
-    pci_bus=5,
-    pci_dev=0,
-    pci_func=0,
-    InterruptLine=0x1E,
-    InterruptPin=4,
-    root_port_number=1,
-    is_invisible=0,
-)
-board.ethernet7.pio = board.pcie_switch.downstreamMaster
-board.ethernet7.dma = board.pcie_switch.downstreamSlave
-board.ethernet7.host = board.platform.pci_host
+    # self.CXL_acc = AccRTL(
+        #     pci_bus=5,
+        #     pci_dev=0,
+        #     pci_func=0,
+        #     InterruptLine=0x3,
+        #     InterruptPin=3,
+        #     root_port_number=0,
+        #     is_invisible=0,
+        # )  # 5
+        # self.CXL_acc.ChanCnt = 4
+        # self.CXL_acc.pio = self.pcie_switch_2.downstreamMaster
+        # # self.CXL_acc.dram_port = self.pcie_switch_2.downstreamSlave
+        # # self.CXL_acc.dma = self.membus.cpu_side_ports
+        # self.CXL_acc.dma = self.pcie_switch_2.downstreamSlave
+        # self.CXL_acc.burstSize = 64
+        # self.CXL_acc.host = self.platform.pci_host
+
+elif args.enable_pci:
+    board.pci_acc = AccRTL(
+        pci_bus=5,
+        pci_dev=0,
+        pci_func=0,
+        InterruptLine=0x1E,
+        InterruptPin=4,
+        root_port_number=1,
+        is_invisible=0,
+    )
+    board.pci_acc.pio = board.iobus.mem_side_ports
+    board.pci_acc.dma = board.iobus.cpu_side_ports
+    board.pci_acc.host = board.platform.pci_host
+
+    board.cxl_mem = CXLMem(
+        disks=[],
+        pci_bus=4,
+        pci_dev=0,
+        pci_func=0,
+        InterruptLine=0x1E,
+        InterruptPin=4,
+        root_port_number=1,
+        is_invisible=0,
+    )
+    board.cxl_mem.pio = board.iobus.mem_side_ports
+    board.cxl_mem.dma = board.iobus.cpu_side_ports
+    board.cxl_memroot.host = board.platform.pci_host
 
 
 # Uncomment to debug with GDB
@@ -227,6 +283,7 @@ board.set_kernel_disk_workload(
     kernel=BinaryResource(local_path="../output/images/bbl"),
     disk_image=DiskImageResource(local_path="../output/images/rootfs.ext2"),
 )
+
 
 simulator = Simulator(board=board)
 
