@@ -49,6 +49,7 @@ from m5.objects import (
     Bridge,
     CowDiskImage,
     CXL_Root_Complex,
+    CXLMem,
     Frequency,
     GenericRiscvPciHost,
     HiFive,
@@ -57,7 +58,6 @@ from m5.objects import (
     IGbE_pcie,
     IOXBar,
     PCIELink,
-    CXLMem,
     PMAChecker,
     Port,
     RawDiskImage,
@@ -228,21 +228,21 @@ if args.enable_pcie:
     board.ethernet7.host = board.platform.pci_host
 
     # self.CXL_acc = AccRTL(
-        #     pci_bus=5,
-        #     pci_dev=0,
-        #     pci_func=0,
-        #     InterruptLine=0x3,
-        #     InterruptPin=3,
-        #     root_port_number=0,
-        #     is_invisible=0,
-        # )  # 5
-        # self.CXL_acc.ChanCnt = 4
-        # self.CXL_acc.pio = self.pcie_switch_2.downstreamMaster
-        # # self.CXL_acc.dram_port = self.pcie_switch_2.downstreamSlave
-        # # self.CXL_acc.dma = self.membus.cpu_side_ports
-        # self.CXL_acc.dma = self.pcie_switch_2.downstreamSlave
-        # self.CXL_acc.burstSize = 64
-        # self.CXL_acc.host = self.platform.pci_host
+    #     pci_bus=5,
+    #     pci_dev=0,
+    #     pci_func=0,
+    #     InterruptLine=0x3,
+    #     InterruptPin=3,
+    #     root_port_number=0,
+    #     is_invisible=0,
+    # )  # 5
+    # self.CXL_acc.ChanCnt = 4
+    # self.CXL_acc.pio = self.pcie_switch_2.downstreamMaster
+    # # self.CXL_acc.dram_port = self.pcie_switch_2.downstreamSlave
+    # # self.CXL_acc.dma = self.membus.cpu_side_ports
+    # self.CXL_acc.dma = self.pcie_switch_2.downstreamSlave
+    # self.CXL_acc.burstSize = 64
+    # self.CXL_acc.host = self.platform.pci_host
 
 elif args.enable_pci:
     board.pci_acc = AccRTL(
