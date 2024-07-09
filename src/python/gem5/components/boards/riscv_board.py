@@ -415,9 +415,6 @@ class RiscvBoard(AbstractSystemBoard, KernelDiskWorkload):
         ranges += self.platform.pci_host.pciFdtAddr(space=2, addr=0)
         ranges += soc_state.addrCells(self.platform.pci_host.pci_mem_base)
         ranges += pci_state.sizeCells(0x40000000)  # Fixed size
-        print(
-            f"*****************************\n{ranges}*****************************\n"
-        )
         pci_node.append(FdtPropertyWords("ranges", ranges))
 
         # Interrupt mapping

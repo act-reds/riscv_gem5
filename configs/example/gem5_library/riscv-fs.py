@@ -187,7 +187,8 @@ if args.enable_pcie:
     board.Root_Complex.master3 = board.pcie_1.upstreamSlave
     board.Root_Complex.host = board.platform.pci_host
 
-    board.ethernet5 = IGbE_e1000(
+    board.ide = IdeController(
+        disks=[],
         pci_bus=6,
         pci_dev=0,
         pci_func=0,
@@ -196,11 +197,25 @@ if args.enable_pcie:
         root_port_number=1,
         is_invisible=0,
     )
-    board.ethernet5.pio = board.pcie_0.downstreamMaster
-    board.ethernet5.dma = board.pcie_0.downstreamSlave
-    board.ethernet5.host = board.platform.pci_host
+    board.ide.pio = board.pcie_0.downstreamMaster
+    board.ide.dma = board.pcie_0.downstreamSlave
+    board.ide.host = board.platform.pci_host
 
-    board.ide = IdeController(
+    # board.ide = IdeController(
+    #     pci_bus=7,
+    #     pci_dev=0,
+    #     pci_func=0,
+    #     InterruptLine=0x2,
+    #     InterruptPin=1,
+    #     root_port_number=2,
+    #     is_invisible=0,
+    # )
+    # board.ide.pio = board.pcie_1.downstreamMaster
+    # board.ide.dma = board.pcie_1.downstreamSlave
+    # board.ide.host = board.platform.pci_host
+    # board.ide.sid = 1
+
+    board.CXL_acc = AccRTL(
         pci_bus=7,
         pci_dev=0,
         pci_func=0,
@@ -209,10 +224,23 @@ if args.enable_pcie:
         root_port_number=2,
         is_invisible=0,
     )
-    board.ide.pio = board.pcie_1.downstreamMaster
-    board.ide.dma = board.pcie_1.downstreamSlave
-    board.ide.host = board.platform.pci_host
-    board.ide.sid = 1
+    board.CXL_acc.pio = board.pcie_1.downstreamMaster
+    board.CXL_acc.dma = board.pcie_1.downstreamSlave
+    board.CXL_acc.host = board.platform.pci_host
+
+    ## Test with PCI only connection
+    board.CXL_acc_pci = AccRTL(
+        pci_bus=2,
+        pci_dev=0,
+        pci_func=0,
+        InterruptLine=0x2,
+        InterruptPin=1,
+        root_port_number=2,
+        is_invisible=0,
+    )
+    board.CXL_acc_pci.pio = board.iobus.mem_side_ports
+    board.CXL_acc_pci.dma = board.iobus.cpu_side_ports
+    board.CXL_acc_pci.host = board.platform.pci_host
 
     board.ethernet7 = IGbE_e1000(
         pci_bus=5,
@@ -227,22 +255,6 @@ if args.enable_pcie:
     board.ethernet7.dma = board.pcie_switch.downstreamSlave
     board.ethernet7.host = board.platform.pci_host
 
-    # self.CXL_acc = AccRTL(
-    #     pci_bus=5,
-    #     pci_dev=0,
-    #     pci_func=0,
-    #     InterruptLine=0x3,
-    #     InterruptPin=3,
-    #     root_port_number=0,
-    #     is_invisible=0,
-    # )  # 5
-    # self.CXL_acc.ChanCnt = 4
-    # self.CXL_acc.pio = self.pcie_switch_2.downstreamMaster
-    # # self.CXL_acc.dram_port = self.pcie_switch_2.downstreamSlave
-    # # self.CXL_acc.dma = self.membus.cpu_side_ports
-    # self.CXL_acc.dma = self.pcie_switch_2.downstreamSlave
-    # self.CXL_acc.burstSize = 64
-    # self.CXL_acc.host = self.platform.pci_host
 
 elif args.enable_pci:
     board.pci_acc = AccRTL(
@@ -272,7 +284,6 @@ elif args.enable_pci:
     board.cxl_mem.dma = board.iobus.cpu_side_ports
     board.cxl_memroot.host = board.platform.pci_host
 
-
 # Uncomment to debug with GDB
 if args.enable_gdb:
     print("Gdb enabled, waiting until gdb connects to the remote target :7000")
@@ -284,10 +295,12 @@ board.set_kernel_disk_workload(
     disk_image=DiskImageResource(local_path="../output/images/rootfs.ext2"),
 )
 
+board.ide.disks.append(board.disk)
 
 simulator = Simulator(board=board)
 
 print("Beginning simulation!")
+
 # Note: This simulation will never stop. You can access the terminal upon boot
 # using m5term (`./util/term`): `./m5term localhost <port>`. Note the `<port>`
 # value is obtained from the gem5 terminal stdout. Look out for
