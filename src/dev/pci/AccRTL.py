@@ -19,8 +19,8 @@ class AccRTL(PciDevice):
     SubsystemID = 0
     SubsystemVendorID = 0
     Status = 0x0000
-    SubClassCode = 0x08
-    ClassCode = 0x80
+    SubClassCode = 0x80
+    ClassCode = 0x08
     ProgIF = 0x00
     MaximumLatency = 0x00
     MinimumGrant = 0xFF

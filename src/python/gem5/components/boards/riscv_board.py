@@ -372,6 +372,12 @@ class RiscvBoard(AbstractSystemBoard, KernelDiskWorkload):
 
         soc_node.append(plic_node)
 
+        # Test node
+        test_state = FdtState(addr_cells=0, interrupt_cells=0)
+        test_node = FdtNode("test")
+        test_node.appendCompatible("test-node-probe,test")
+        soc_node.append(test_node)
+
         # PCI
         pci_state = FdtState(
             addr_cells=3, size_cells=2, cpu_cells=1, interrupt_cells=1

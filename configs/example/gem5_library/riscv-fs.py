@@ -85,62 +85,12 @@ from gem5.resources.resource import (
 from gem5.simulate.simulator import Simulator
 from gem5.utils.requires import requires
 
-parser = argparse.ArgumentParser(
-    description="Passing arguments to customize Risc-V system launch"
-)
 
-parser.add_argument(
-    "--enable-gdb", action="store_true", help="Enable the special feature"
-)
-
-parser.add_argument(
-    "--enable-pcie", action="store_true", help="Enable the special feature"
-)
-
-parser.add_argument(
-    "--enable-pci", action="store_true", help="Enable the special feature"
-)
-
-
-args = parser.parse_args()
-
-# Run a check to ensure the right version of gem5 is being used.
-requires(isa_required=ISA.RISCV)
-
-# Setup the cache hierarchy.
-# For classic, PrivateL1PrivateL2 and NoCache have been tested.
-# For Ruby, MESI_Two_Level and MI_example have been tested.
-cache_hierarchy = NoCache()
-
-# Setup the system memory.
-memory = SingleChannelDDR3_1600()
-
-
-# cpu_cluster = CpuCluster()
-# cpu_cluster.generate_cpus("AtomicCPU", 2)
-
-# Setup a single core Processor.
-processor = SimpleProcessor(
-    cpu_type=CPUTypes.ATOMIC, isa=ISA.RISCV, num_cores=1
-)
-
-# Setup the board.
-board = RiscvBoard(
-    clk_freq="1GHz",
-    processor=processor,
-    memory=memory,
-    cache_hierarchy=cache_hierarchy,
-)
-
-if args.enable_pcie:
-    # Root complex
+def add_pcie(board):
     switch_up_lanes = 4
     lanes = 4  # 1
     cacheline_size = 64
     replay_buffer_size = 64
-    should_print = False
-    switch_buffer_size = 64
-    pcie_switch_delay = "50ns"
 
     # Declare PCIe links to connect the root complex
     board.pcie_switch = PCIELink(
@@ -187,8 +137,7 @@ if args.enable_pcie:
     board.Root_Complex.master3 = board.pcie_1.upstreamSlave
     board.Root_Complex.host = board.platform.pci_host
 
-    board.ide = IdeController(
-        disks=[],
+    board.ethernet2 = IGbE_e1000(
         pci_bus=6,
         pci_dev=0,
         pci_func=0,
@@ -197,9 +146,24 @@ if args.enable_pcie:
         root_port_number=1,
         is_invisible=0,
     )
-    board.ide.pio = board.pcie_0.downstreamMaster
-    board.ide.dma = board.pcie_0.downstreamSlave
-    board.ide.host = board.platform.pci_host
+    board.ethernet2.pio = board.pcie_0.downstreamMaster
+    board.ethernet2.dma = board.pcie_0.downstreamSlave
+    board.ethernet2.host = board.platform.pci_host
+
+    # board.ide = IdeController(
+    #     disks=[],
+    #     pci_bus=6,
+    #     pci_dev=0,
+    #     pci_func=0,
+    #     InterruptLine=0x1E,
+    #     InterruptPin=4,
+    #     root_port_number=1,
+    #     is_invisible=0,
+    # )
+    # board.ide.pio = board.pcie_0.downstreamMaster
+    # board.ide.dma = board.pcie_0.downstreamSlave
+    # board.ide.host = board.platform.pci_host
+    # board.ide.disks.append(board.disk)
 
     # board.ide = IdeController(
     #     pci_bus=7,
@@ -230,8 +194,8 @@ if args.enable_pcie:
 
     ## Test with PCI only connection
     board.CXL_acc_pci = AccRTL(
-        pci_bus=2,
-        pci_dev=0,
+        pci_bus=0,
+        pci_dev=1,
         pci_func=0,
         InterruptLine=0x2,
         InterruptPin=1,
@@ -256,53 +220,80 @@ if args.enable_pcie:
     board.ethernet7.host = board.platform.pci_host
 
 
-elif args.enable_pci:
-    board.pci_acc = AccRTL(
-        pci_bus=5,
-        pci_dev=0,
-        pci_func=0,
-        InterruptLine=0x1E,
-        InterruptPin=4,
-        root_port_number=1,
-        is_invisible=0,
+def make_riskv_system(args):
+    cache_hierarchy = NoCache()
+
+    # Setup the system memory.
+    memory = SingleChannelDDR3_1600()
+
+    # Setup a single core Processor.
+    processor = SimpleProcessor(
+        cpu_type=CPUTypes.ATOMIC, isa=ISA.RISCV, num_cores=4
     )
-    board.pci_acc.pio = board.iobus.mem_side_ports
-    board.pci_acc.dma = board.iobus.cpu_side_ports
-    board.pci_acc.host = board.platform.pci_host
 
-    board.cxl_mem = CXLMem(
-        disks=[],
-        pci_bus=4,
-        pci_dev=0,
-        pci_func=0,
-        InterruptLine=0x1E,
-        InterruptPin=4,
-        root_port_number=1,
-        is_invisible=0,
+    # Setup the board.
+    board = RiscvBoard(
+        clk_freq="1GHz",
+        processor=processor,
+        memory=memory,
+        cache_hierarchy=cache_hierarchy,
     )
-    board.cxl_mem.pio = board.iobus.mem_side_ports
-    board.cxl_mem.dma = board.iobus.cpu_side_ports
-    board.cxl_memroot.host = board.platform.pci_host
 
-# Uncomment to debug with GDB
-if args.enable_gdb:
-    print("Gdb enabled, waiting until gdb connects to the remote target :7000")
-    board.workload.wait_for_remote_gdb = True
+    board.readfile = args.readfile_script
 
-# Set the Full System workload.
-board.set_kernel_disk_workload(
-    kernel=BinaryResource(local_path="../output/images/bbl"),
-    disk_image=DiskImageResource(local_path="../output/images/rootfs.ext2"),
-)
+    if args.enable_pcie:
+        add_pcie(board)
 
-board.ide.disks.append(board.disk)
+    if args.enable_gdb:
+        board.workload.wait_for_remote_gdb = True
 
-simulator = Simulator(board=board)
+    # Set the Full System workload.
+    board.set_kernel_disk_workload(
+        kernel=BinaryResource(local_path="../output/images/bbl"),
+        disk_image=DiskImageResource(
+            local_path="../output/images/rootfs.ext2"
+        ),
+    )
 
-print("Beginning simulation!")
+    simulator = Simulator(board=board, checkpoint_path=args.checkpoint_restore)
 
-# Note: This simulation will never stop. You can access the terminal upon boot
-# using m5term (`./util/term`): `./m5term localhost <port>`. Note the `<port>`
-# value is obtained from the gem5 terminal stdout. Look out for
-# "system.platform.terminal: Listening for connections on port <port>".
-simulator.run()
+    print("Beginning simulation!")
+
+    simulator.run()
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Passing arguments to customize Risc-V system launch"
+    )
+
+    parser.add_argument(
+        "--enable-gdb",
+        action="store_true",
+        help="enable GDB mode - system waits for a remote connection to port :7000",
+    )
+
+    parser.add_argument(
+        "--enable-pcie",
+        action="store_true",
+        help="add the PCIe hierarchy to the system",
+    )
+
+    parser.add_argument(
+        "--readfile-script",
+        type=str,
+        help="path to the file that can be read from the system",
+    )
+
+    parser.add_argument(
+        "--checkpoint-restore", type=str, help="path to the checkpoint folder"
+    )
+
+    args = parser.parse_args()
+
+    requires(isa_required=ISA.RISCV)
+
+    make_riskv_system(args)
+
+
+main()
